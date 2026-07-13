@@ -77,8 +77,17 @@ def init(
 
 
 @app.command()
-def scan(ctx: typer.Context) -> None:
+def scan(
+    ctx: typer.Context,
+    source: str = typer.Option(
+        "hydra",
+        "--source",
+        help="Filter by launcher: 'hydra' (non-Steam/Epic/Xbox), 'all', 'steam', 'epic', 'xbox'",
+    ),
+) -> None:
     """Scan for installed games and their save locations."""
+    from .launcher import detect_launcher, get_all_launcher_games
+
     config_path = ctx.obj.get("config_path")
     ludusavi_path = get_ludusavi_path(config_path)
     console.print("[cyan]Scanning for games with Ludusavi...[/cyan]")
@@ -88,17 +97,52 @@ def scan(ctx: typer.Context) -> None:
         console.print("[yellow]No games found.[/yellow]")
         return
 
+    # Detect launcher for each game
+    steam_games, epic_games, xbox_games = get_all_launcher_games()
+
     table = Table(title="Detected Games")
     table.add_column("Title")
+    table.add_column("Source")
     table.add_column("Files")
     table.add_column("Size")
+
+    source_colors = {
+        "steam": "blue",
+        "epic": "magenta",
+        "xbox": "green",
+        "other": "cyan",
+    }
 
     for title, info in games_data.items():
         files = info.get("files", {})
         size = sum(f.get("size", 0) for f in files.values())
-        table.add_row(title, str(len(files)), _human_size(size))
+        save_paths = list(files.keys())
+        detected = detect_launcher(
+            title, save_paths, steam_games, epic_games, xbox_games
+        )
+
+        # Filter: "hydra" shows non-Steam/Epic/Xbox games (detected as "other")
+        if source == "all":
+            pass
+        elif source == "hydra":
+            if detected != "other":
+                continue
+        elif detected != source:
+            continue
+
+        color = source_colors.get(detected, "white")
+        table.add_row(
+            title,
+            f"[{color}]{detected}[/{color}]",
+            str(len(files)),
+            _human_size(size),
+        )
 
     console.print(table)
+    if source != "all":
+        console.print(
+            f"[dim]Filtered by source: {source}. Use --source all to see every game.[/dim]"
+        )
 
 
 @app.command()
