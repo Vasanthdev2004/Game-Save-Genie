@@ -1,0 +1,420 @@
+"""Command line interface for Game Save Genie."""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from . import __version__  # noqa: F401
+from .cloud import (
+    get_rclone_path,
+    list_remote_versions,
+    run_rclone,
+    upload_save,
+)
+from .config import (
+    get_config_path,
+    get_data_dir,
+    load_config,
+    load_games,
+    save_config,
+    save_games,
+)
+from .database import Database
+from .ludusavi import backup_game, get_ludusavi_path, restore_game, scan_games
+from .models import BackupResult, CloudProvider, Game, Platform, SaveVersion, SyncConfig
+from .remap import _current_platform
+from .watcher import GameWatcher
+
+app = typer.Typer(help="Game Save Genie - self-hosted cloud save sync")
+console = Console()
+
+
+def _configure_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+
+@app.callback()
+def main(
+    ctx: typer.Context,
+    config: Optional[Path] = typer.Option(None, "--config", help="Path to config file"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
+) -> None:
+    """Global options."""
+    _configure_logging(verbose)
+    ctx.ensure_object(dict)
+    ctx.obj["config_path"] = config
+
+
+@app.command()
+def init(
+    ctx: typer.Context,
+    backup_dir: Optional[Path] = typer.Option(None, help="Local backup directory"),
+) -> None:
+    """Initialize Game Save Genie configuration."""
+    config_path = ctx.obj.get("config_path") or get_config_path()
+    config = load_config(config_path)
+    if backup_dir:
+        config.backup_dir = backup_dir
+    config.backup_dir.mkdir(parents=True, exist_ok=True)
+    save_config(config, config_path)
+    save_games([], config_path)
+    Database(get_data_dir() / "versions.db")
+    console.print(f"[green]Initialized Game Save Genie at {config_path.parent}[/green]")
+    console.print(f"Backups: {config.backup_dir}")
+
+
+@app.command()
+def scan(ctx: typer.Context) -> None:
+    """Scan for installed games and their save locations."""
+    config_path = ctx.obj.get("config_path")
+    ludusavi_path = get_ludusavi_path(config_path)
+    console.print("[cyan]Scanning for games with Ludusavi...[/cyan]")
+    data = scan_games(ludusavi_path)
+    games_data = data.get("games", {})
+    if not games_data:
+        console.print("[yellow]No games found.[/yellow]")
+        return
+
+    table = Table(title="Detected Games")
+    table.add_column("Title")
+    table.add_column("Files")
+    table.add_column("Size")
+
+    for title, info in games_data.items():
+        files = info.get("files", {})
+        size = sum(f.get("size", 0) for f in files.values())
+        table.add_row(title, str(len(files)), _human_size(size))
+
+    console.print(table)
+
+
+@app.command()
+def add(
+    ctx: typer.Context,
+    title: str = typer.Argument(..., help="Game title"),
+    executable: Optional[str] = typer.Option(None, "--exe", help="Executable name to watch"),
+    platform: Platform = typer.Option(_current_platform(), "--platform", help="Platform"),
+    cloud: Optional[CloudProvider] = typer.Option(None, "--cloud", help="Cloud provider"),
+    remote_path: Optional[str] = typer.Option(None, "--remote", help="Remote path/remote name"),
+    no_auto_sync: bool = typer.Option(False, "--no-auto-sync", help="Disable auto-sync"),
+) -> None:
+    """Add a game to track."""
+    config_path = ctx.obj.get("config_path")
+    games = load_games(config_path)
+    game_id = _slugify(title)
+    if any(g.id == game_id for g in games):
+        console.print(f"[yellow]Game '{title}' is already tracked.[/yellow]")
+        raise typer.Exit(1)
+
+    game = Game(
+        id=game_id,
+        title=title,
+        platform=platform,
+        executable_names=[executable] if executable else [],
+        auto_sync=not no_auto_sync,
+        cloud_provider=cloud,
+        remote_path=remote_path,
+    )
+    games.append(game)
+    save_games(games, config_path)
+    console.print(f"[green]Added game: {title} ({game_id})[/green]")
+
+
+@app.command(name="list")
+def list_games(ctx: typer.Context) -> None:
+    """List tracked games."""
+    config_path = ctx.obj.get("config_path")
+    games = load_games(config_path)
+    if not games:
+        console.print("[yellow]No games tracked.[/yellow]")
+        return
+
+    table = Table(title="Tracked Games")
+    table.add_column("ID")
+    table.add_column("Title")
+    table.add_column("Platform")
+    table.add_column("Auto Sync")
+    table.add_column("Cloud")
+
+    for game in games:
+        table.add_row(
+            game.id,
+            game.title,
+            game.platform.value,
+            "yes" if game.auto_sync else "no",
+            game.cloud_provider.value if game.cloud_provider else "none",
+        )
+    console.print(table)
+
+
+@app.command()
+def backup(
+    ctx: typer.Context,
+    game_id: Optional[str] = typer.Argument(None, help="Game ID to backup (omit for all)"),
+    label: Optional[str] = typer.Option(None, "--label", help="Backup label"),
+    no_cloud: bool = typer.Option(False, "--no-cloud", help="Skip cloud upload"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen"),
+) -> None:
+    """Back up save data for one or all games."""
+    config_path = ctx.obj.get("config_path")
+    config = load_config(config_path)
+    games = load_games(config_path)
+    db = Database(get_data_dir() / "versions.db")
+    ludusavi_path = get_ludusavi_path(config_path)
+
+    targets = [g for g in games if g.id == game_id] if game_id else games
+    if game_id and not targets:
+        console.print(f"[red]Game not found: {game_id}[/red]")
+        raise typer.Exit(1)
+
+    for game in targets:
+        result = _run_backup(game, config, db, ludusavi_path, label)
+        console.print(f"{'[green]' if result.success else '[red]'}{result.message}[/]")
+        if result.success and result.version and not no_cloud and game.cloud_provider:
+            _cloud_upload(ctx, game, result.version, dry_run)
+
+
+@app.command()
+def restore(
+    ctx: typer.Context,
+    game_id: str = typer.Argument(..., help="Game ID to restore"),
+    version_id: Optional[str] = typer.Option(None, "--version", help="Version ID (omit for latest)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen"),
+) -> None:
+    """Restore a save version for a game."""
+    config_path = ctx.obj.get("config_path")
+    games = load_games(config_path)
+    game = next((g for g in games if g.id == game_id), None)
+    if not game:
+        console.print(f"[red]Game not found: {game_id}[/red]")
+        raise typer.Exit(1)
+
+    db = Database(get_data_dir() / "versions.db")
+    if version_id:
+        version = db.get_version(version_id)
+    else:
+        versions = db.get_versions(game_id)
+        version = versions[0] if versions else None
+
+    if not version:
+        console.print(f"[red]No local version found for {game_id}.[/red]")
+        raise typer.Exit(1)
+
+    if dry_run:
+        console.print(f"[cyan]Would restore version {version.id} for {game.title}[/cyan]")
+        return
+
+    ludusavi_path = get_ludusavi_path(config_path)
+    restore_game(ludusavi_path, game, version)
+    console.print(f"[green]Restored {game.title} from version {version.id}[/green]")
+
+
+@app.command()
+def versions(
+    ctx: typer.Context,
+    game_id: str = typer.Argument(..., help="Game ID"),
+) -> None:
+    """List save versions for a game."""
+    db = Database(get_data_dir() / "versions.db")
+    versions_list = db.get_versions(game_id)
+    if not versions_list:
+        console.print("[yellow]No versions found.[/yellow]")
+        return
+
+    table = Table(title=f"Save Versions for {game_id}")
+    table.add_column("Version ID")
+    table.add_column("Created")
+    table.add_column("Size")
+    table.add_column("Files")
+    table.add_column("Machine")
+    table.add_column("Cloud")
+
+    for v in versions_list:
+        table.add_row(
+            v.id,
+            v.created_at.strftime("%Y-%m-%d %H:%M"),
+            _human_size(v.size_bytes),
+            str(v.file_count),
+            v.source_machine or "unknown",
+            "yes" if v.cloud_synced else "no",
+        )
+    console.print(table)
+
+
+@app.command()
+def cloud_list(
+    ctx: typer.Context,
+    game_id: str = typer.Argument(..., help="Game ID"),
+) -> None:
+    """List versions available in the cloud for a game."""
+    config_path = ctx.obj.get("config_path")
+    config = load_config(config_path)
+    games = load_games(config_path)
+    game = next((g for g in games if g.id == game_id), None)
+    if not game or not game.cloud_provider:
+        console.print("[red]Game has no cloud provider configured.[/red]")
+        raise typer.Exit(1)
+
+    rclone_path = get_rclone_path(config_path)
+    remote_name = game.remote_path or config.remote_root
+    version_ids = list_remote_versions(rclone_path, game, remote_name, config.remote_root)
+    if not version_ids:
+        console.print("[yellow]No cloud versions found.[/yellow]")
+        return
+    for vid in version_ids:
+        console.print(vid)
+
+
+@app.command()
+def watch(ctx: typer.Context) -> None:
+    """Watch running games and auto-backup on close."""
+    config_path = ctx.obj.get("config_path")
+    config = load_config(config_path)
+    games = load_games(config_path)
+    if not config.auto_sync_on_game_close:
+        console.print("[yellow]Auto-sync on game close is disabled in config.[/yellow]")
+        raise typer.Exit(1)
+
+    db = Database(get_data_dir() / "versions.db")
+    ludusavi_path = get_ludusavi_path(config_path)
+
+    def on_close(game: Game, proc_info: object) -> None:
+        console.print(f"[cyan]Game closed: {game.title}. Backing up...[/cyan]")
+        result = _run_backup(game, config, db, ludusavi_path, label=f"Auto-backup on {datetime.now()}")
+        console.print(f"{'[green]' if result.success else '[red]'}{result.message}[/]")
+        if result.success and result.version and game.cloud_provider:
+            _cloud_upload(ctx, game, result.version, dry_run=False)
+
+    watcher = GameWatcher(games)
+    watcher.set_on_game_close(on_close)
+    console.print("[green]Watching for games. Press Ctrl+C to stop.[/green]")
+    try:
+        watcher.watch_loop()
+    except KeyboardInterrupt:
+        console.print("[yellow]Stopped watching.[/yellow]")
+
+
+@app.command()
+def config_cmd(
+    ctx: typer.Context,
+    backup_dir: Optional[Path] = typer.Option(None, "--backup-dir", help="Set backup directory"),
+    max_versions: Optional[int] = typer.Option(None, "--max-versions", help="Max versions to keep"),
+    cloud_provider: Optional[CloudProvider] = typer.Option(None, "--cloud-provider", help="Default cloud provider"),
+    remote_root: Optional[str] = typer.Option(None, "--remote-root", help="Remote root path"),
+    ludusavi_path: Optional[Path] = typer.Option(None, "--ludusavi", help="Path to ludusavi binary"),
+    rclone_path: Optional[Path] = typer.Option(None, "--rclone", help="Path to rclone binary"),
+) -> None:
+    """View or edit configuration."""
+    config_path = ctx.obj.get("config_path") or get_config_path()
+    config = load_config(config_path)
+    if backup_dir:
+        config.backup_dir = backup_dir
+    if max_versions is not None:
+        config.max_versions = max_versions
+    if cloud_provider:
+        config.cloud_provider = cloud_provider
+    if remote_root:
+        config.remote_root = remote_root
+    if ludusavi_path:
+        config.ludusavi_path = ludusavi_path
+    if rclone_path:
+        config.rclone_path = rclone_path
+    save_config(config, config_path)
+    console.print(f"[green]Configuration saved to {config_path}[/green]")
+    console.print(f"backup_dir: {config.backup_dir}")
+    console.print(f"max_versions: {config.max_versions}")
+    console.print(f"cloud_provider: {config.cloud_provider}")
+    console.print(f"remote_root: {config.remote_root}")
+
+
+@app.command()
+def setup_rclone(
+    ctx: typer.Context,
+    remote_name: str = typer.Argument(..., help="Name for the rclone remote"),
+) -> None:
+    """Launch rclone config to set up a cloud remote."""
+    config_path = ctx.obj.get("config_path")
+    rclone_path = get_rclone_path(config_path)
+    console.print(f"[cyan]Launching rclone config for remote '{remote_name}'...[/cyan]")
+    console.print("Follow the interactive prompts. When done, set the remote name with --remote.")
+    run_rclone(rclone_path, ["config"], capture_output=False, check=False)
+
+
+def _run_backup(
+    game: Game,
+    config: SyncConfig,
+    db: Database,
+    ludusavi_path: Path,
+    label: Optional[str] = None,
+) -> BackupResult:
+    result = backup_game(ludusavi_path, game, config.backup_dir, label)
+    if result.success and result.version:
+        db.add_version(result.version)
+        _prune_old_versions(db, game.id, config.max_versions)
+    return result
+
+
+def _prune_old_versions(db: Database, game_id: str, max_versions: int) -> None:
+    versions = db.get_versions(game_id)
+    if len(versions) <= max_versions:
+        return
+    for old in versions[max_versions:]:
+        db.delete_version(old.id)
+
+
+def _cloud_upload(
+    ctx: typer.Context,
+    game: Game,
+    version: SaveVersion,
+    dry_run: bool,
+) -> None:
+    config_path = ctx.obj.get("config_path")
+    config = load_config(config_path)
+    provider = game.cloud_provider or config.cloud_provider
+    if not provider:
+        return
+    rclone_path = get_rclone_path(config_path)
+    remote_name = game.remote_path or config.remote_root
+    result = upload_save(
+        rclone_path,
+        game,
+        version,
+        remote_name,
+        config.remote_root,
+        dry_run=dry_run,
+        extra_args=config.custom_rclone_args,
+    )
+    console.print(f"[{'green' if result.success else 'red'}]{result.message}[/]")
+    if result.success:
+        db = Database(get_data_dir() / "versions.db")
+        db.mark_cloud_synced(version.id, result.remote_path)
+
+
+def _slugify(text: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in text.strip().lower()).strip("-")
+
+
+def _human_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    size = float(size_bytes)
+    for unit in ["KiB", "MiB", "GiB", "TiB"]:
+        size /= 1024.0
+        if size < 1024.0:
+            return f"{size:.2f} {unit}"
+    return f"{size:.2f} TiB"
+
+
+def run() -> None:
+    app()
