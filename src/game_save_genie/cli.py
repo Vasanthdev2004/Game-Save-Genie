@@ -14,7 +14,7 @@ from rich.table import Table
 from . import __version__  # noqa: F401
 from .cloud import (
     _remote_path,
-    download_latest_save,
+    download_save,
     get_rclone_path,
     get_remote_size,
     list_remote_versions,
@@ -31,9 +31,25 @@ from .config import (
     save_games,
 )
 from .database import Database
-from .ludusavi import backup_game, get_ludusavi_path, restore_game, scan_games
-from .models import BackupResult, CloudProvider, Game, Platform, SaveVersion, SyncConfig
+from .ludusavi import (
+    backup_game,
+    get_ludusavi_path,
+    restore_from_backup,
+    restore_game,
+    scan_games,
+)
+from .models import (
+    BackupResult,
+    CloudProvider,
+    Game,
+    Platform,
+    ProcessInfo,
+    SaveVersion,
+    SyncConfig,
+)
+from .notify import notify, setup_file_logging
 from .remap import _current_platform
+from .sync import latest_version_id, should_restore_from_cloud
 from .watcher import GameWatcher
 
 app = typer.Typer(help="Game Save Genie - self-hosted cloud save sync")
@@ -464,6 +480,7 @@ def auto(
 
     config_path = ctx.obj.get("config_path")
     config = load_config(config_path)
+    setup_file_logging(get_data_dir() / "logs")
 
     # Verify Railway S3 is configured
     if not config.rclone_remote_name or not config.cloud_provider:
@@ -526,27 +543,19 @@ def auto(
     db = Database(get_data_dir() / "versions.db")
     rclone_path = get_rclone_path(config_path)
 
-    def on_start(game: Game, proc_info: object) -> None:
+    def on_start(game: Game, proc_info: ProcessInfo) -> None:
         console.print(f"[green]Game started: {game.title}[/green]")
-        # Auto-restore latest cloud save
-        if game.cloud_provider:
-            console.print("[cyan]Checking for cloud saves...[/cyan]")
-            restore_dir = config.backup_dir / game.id / "_cloud_restore"
-            result = download_latest_save(
-                rclone_path, game, restore_dir,
-                config.rclone_remote_name or "", config.remote_root,
-            )
-            if result.success:
-                console.print(f"[green]Restored latest cloud save for {game.title}[/green]")
-            else:
-                console.print(f"[dim]{result.message}[/dim]")
+        notify("Game started", game.title)
+        _remember_executable(game, proc_info, config_path)
+        _auto_restore_on_start(game, config, db, rclone_path, ludusavi_path)
 
-    def on_close(game: Game, proc_info: object) -> None:
+    def on_close(game: Game, proc_info: ProcessInfo) -> None:
         console.print(f"[cyan]Game closed: {game.title}. Backing up to Railway S3...[/cyan]")
         result = _run_backup(game, config, db, ludusavi_path, label=f"Auto-backup on {datetime.now()}")
         console.print(f"{'[green]' if result.success else '[red]'}{result.message}[/]")
         if result.success and result.version and result.files_changed > 0:
             _cloud_upload(ctx, game, result.version, dry_run=False)
+            notify("Save backed up", game.title)
 
     def on_periodic(game: Game) -> None:
         console.print(f"[cyan]Periodic backup: {game.title}...[/cyan]")
@@ -554,6 +563,7 @@ def auto(
         if result.success and result.version and result.files_changed > 0:
             console.print(f"[green]{result.message}[/green]")
             _cloud_upload(ctx, game, result.version, dry_run=False)
+            notify("Save backed up", game.title)
         else:
             console.print(f"[dim]{result.message}[/dim]")
 
@@ -761,6 +771,86 @@ def _cloud_upload(
     if result.success:
         db = Database(get_data_dir() / "versions.db")
         db.mark_cloud_synced(version.id, result.remote_path)
+
+
+def _cloud_restore_dir(game_id: str) -> Path:
+    """Staging directory for downloaded cloud saves (outside the backup tree)."""
+    return get_data_dir() / "cloud_restore" / game_id
+
+
+def _reset_dir(path: Path) -> None:
+    import shutil
+
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _remember_executable(
+    game: Game, proc_info: ProcessInfo, config_path: Optional[Path]
+) -> None:
+    """Persist the matched process name so future matches are exact, not fuzzy."""
+    if game.executable_names or not proc_info.name:
+        return
+    games = load_games(config_path)
+    for tracked in games:
+        if tracked.id == game.id and not tracked.executable_names:
+            tracked.executable_names = [proc_info.name]
+            game.executable_names = [proc_info.name]
+            save_games(games, config_path)
+            console.print(f"[dim]Learned executable for {game.title}: {proc_info.name}[/dim]")
+            break
+
+
+def _auto_restore_on_start(
+    game: Game,
+    config: SyncConfig,
+    db: Database,
+    rclone_path: Path,
+    ludusavi_path: Path,
+) -> None:
+    """Restore the latest cloud save on launch, only when it is newer than local."""
+    if not game.cloud_provider:
+        return
+    remote_name = game.remote_path or config.rclone_remote_name
+    if not remote_name:
+        return
+
+    try:
+        cloud_ids = list_remote_versions(rclone_path, game, remote_name, config.remote_root)
+    except RuntimeError as exc:
+        console.print(f"[dim]Cloud check failed for {game.title}: {exc}[/dim]")
+        return
+
+    cloud_latest = latest_version_id(cloud_ids)
+    local_versions = db.get_versions(game.id)
+    local_latest = local_versions[0].id if local_versions else None
+
+    if not should_restore_from_cloud(local_latest, cloud_latest) or cloud_latest is None:
+        console.print(f"[dim]{game.title}: local save is up to date.[/dim]")
+        return
+
+    # Secure the current on-disk state so local progress is never lost.
+    console.print(f"[cyan]{game.title}: cloud has a newer save. Securing current state...[/cyan]")
+    _run_backup(game, config, db, ludusavi_path, label="Safety backup before cloud restore")
+
+    restore_dir = _cloud_restore_dir(game.id)
+    _reset_dir(restore_dir)
+    result = download_save(
+        rclone_path, game, cloud_latest, restore_dir, remote_name, config.remote_root
+    )
+    if not result.success:
+        console.print(f"[red]{result.message}[/red]")
+        return
+
+    try:
+        restore_from_backup(ludusavi_path, game, restore_dir)
+    except RuntimeError as exc:
+        console.print(f"[red]Restore failed for {game.title}: {exc}[/red]")
+        return
+
+    notify("Cloud save restored", game.title)
+    console.print(f"[green]Restored latest cloud save for {game.title}[/green]")
 
 
 def _slugify(text: str) -> str:

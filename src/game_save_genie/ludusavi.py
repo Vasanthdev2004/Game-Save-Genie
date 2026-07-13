@@ -223,7 +223,21 @@ def restore_game(
     version: SaveVersion,
 ) -> dict[str, Any]:
     """Restore a save version using Ludusavi."""
-    args = ["restore", game.title, "--api", "--force", "--path", str(version.local_path)]
+    return restore_from_backup(binary, game, version.local_path)
+
+
+def restore_from_backup(
+    binary: Path,
+    game: Game,
+    backup_path: Path,
+) -> dict[str, Any]:
+    """Restore a game's saves from a Ludusavi backup directory.
+
+    ``backup_path`` must contain the Ludusavi backup structure (``mapping.yaml``
+    plus the backed-up drive folders), which is exactly what a downloaded and
+    extracted cloud save provides.
+    """
+    args = ["restore", game.title, "--api", "--force", "--path", str(backup_path)]
     if game.platform == Platform.LINUX and any(p.wine_prefix_path for p in game.save_paths):
         wine_prefix = next(p.wine_prefix_path for p in game.save_paths if p.wine_prefix_path)
         if wine_prefix:

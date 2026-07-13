@@ -16,6 +16,52 @@ from .models import Game, ProcessInfo
 
 logger = logging.getLogger(__name__)
 
+_TITLE_SKIP_WORDS = {
+    "the", "a", "an", "of", "and", "or", "for", "to",
+    "arise", "overdrive", "collection", "edition", "remastered",
+    "game", "play", "launcher",
+}
+
+
+def title_keywords(title: str) -> list[str]:
+    """Return significant lowercase words from a game title for matching."""
+    return [
+        word.lower()
+        for word in re.split(r"[^a-zA-Z0-9]+", title)
+        if len(word) >= 4 and word.lower() not in _TITLE_SKIP_WORDS
+    ]
+
+
+def is_system_executable(exe: str | None) -> bool:
+    """Return True for OS/system processes that should never match a game."""
+    if not exe:
+        return False
+    normalized = exe.lower().replace("\\", "/")
+    return "/windows/" in normalized
+
+
+def title_matches_process(name: str, exe: str | None, title: str) -> bool:
+    """Fuzzy-match a game title against a process, avoiding false positives.
+
+    A match requires a title keyword (or the whole compacted title) to appear
+    in the executable's full path. Bare process-name matches are intentionally
+    rejected because generic names cause false positives. System executables
+    never match.
+    """
+    if is_system_executable(exe):
+        return False
+
+    keywords = title_keywords(title)
+    if not keywords or not exe:
+        return False
+
+    exe_compact = exe.lower().replace("\\", "/").replace(" ", "")
+    compact_title = "".join(keywords)
+    if compact_title and compact_title in exe_compact:
+        return True
+
+    return any(word in exe_compact for word in keywords)
+
 
 class GameWatcher:
     """Watch for running games and trigger callbacks on start/close."""
@@ -119,31 +165,8 @@ class GameWatcher:
         return False
 
     def _matches_by_title(self, name: str, exe: str | None, title: str) -> bool:
-        """Fuzzy match a game title against process name and exe path."""
-        # Extract significant words from the title (skip short/common words)
-        skip_words = {"the", "a", "an", "of", "and", "or", "arise", "overdrive", "collection"}
-        words = [
-            w for w in re.split(r"[^a-zA-Z0-9]+", title)
-            if len(w) >= 4 and w.lower() not in skip_words
-        ]
-        if not words:
-            return False
-
-        name_lower = name.lower()
-        exe_lower = (exe or "").lower()
-
-        # Check if the process name or exe path contains a title keyword
-        for word in words:
-            word_lower = word.lower()
-            # Match with or without spaces/underscores
-            if word_lower in name_lower or word_lower in exe_lower:
-                return True
-            # Also try without spaces (e.g., "SoloLeveling" matches "Solo Leveling")
-            compact = word_lower.replace(" ", "")
-            if compact in name_lower or compact in exe_lower:
-                return True
-
-        return False
+        """Fuzzy match a game title against a process (delegates to pure helper)."""
+        return title_matches_process(name, exe, title)
 
     def _iter_processes(self) -> Any:
         for proc in psutil.process_iter(["pid", "name", "exe", "status", "create_time"]):
