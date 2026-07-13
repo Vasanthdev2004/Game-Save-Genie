@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -24,9 +25,13 @@ class GameWatcher:
         self._seen_pids: set[int] = set()
         self._running: dict[str, int] = {}
         self.on_game_close: Callable[[Game, ProcessInfo], None] | None = None
+        self.on_game_start: Callable[[Game, ProcessInfo], None] | None = None
 
     def set_on_game_close(self, callback: Callable[[Game, ProcessInfo], None]) -> None:
         self.on_game_close = callback
+
+    def set_on_game_start(self, callback: Callable[[Game, ProcessInfo], None]) -> None:
+        self.on_game_start = callback
 
     def scan(self) -> list[ProcessInfo]:
         """Scan for currently running game processes."""
@@ -46,6 +51,12 @@ class GameWatcher:
                 if self._matches_game(proc, game):
                     currently_running[game.id] = proc.pid
                     self._seen_pids.add(proc.pid)
+                    # Detect newly started games
+                    if game.id not in self._running and self.on_game_start is not None:
+                        proc_info = self._process_info_from_pid(proc.pid)
+                        if proc_info is not None:
+                            logger.info("Game started: %s (pid %d)", game.title, proc.pid)
+                            self.on_game_start(game, proc_info)
                     break
 
         # Detect closed games
@@ -74,11 +85,44 @@ class GameWatcher:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
 
+        # Match by executable name (explicit)
         for executable in game.executable_names:
             if executable.lower() in name.lower():
                 return True
             if exe and executable.lower() in exe.lower():
                 return True
+
+        # Fallback: match by game title keywords in process name/exe path
+        if not game.executable_names:
+            return self._matches_by_title(name, exe, game.title)
+
+        return False
+
+    def _matches_by_title(self, name: str, exe: str | None, title: str) -> bool:
+        """Fuzzy match a game title against process name and exe path."""
+        # Extract significant words from the title (skip short/common words)
+        skip_words = {"the", "a", "an", "of", "and", "or", "arise", "overdrive", "collection"}
+        words = [
+            w for w in re.split(r"[^a-zA-Z0-9]+", title)
+            if len(w) >= 4 and w.lower() not in skip_words
+        ]
+        if not words:
+            return False
+
+        name_lower = name.lower()
+        exe_lower = (exe or "").lower()
+
+        # Check if the process name or exe path contains a title keyword
+        for word in words:
+            word_lower = word.lower()
+            # Match with or without spaces/underscores
+            if word_lower in name_lower or word_lower in exe_lower:
+                return True
+            # Also try without spaces (e.g., "SoloLeveling" matches "Solo Leveling")
+            compact = word_lower.replace(" ", "")
+            if compact in name_lower or compact in exe_lower:
+                return True
+
         return False
 
     def _iter_processes(self) -> Any:

@@ -352,6 +352,139 @@ def watch(ctx: typer.Context) -> None:
 
 
 @app.command()
+def auto(
+    ctx: typer.Context,
+    install: bool = typer.Option(False, "--install", help="Add to Windows startup so it runs automatically on boot"),
+    uninstall: bool = typer.Option(False, "--uninstall", help="Remove from Windows startup"),
+    interval: float = typer.Option(5.0, "--interval", help="Polling interval in seconds"),
+) -> None:
+    """Fully automatic cloud backup. Scans for Hydra/manual games, watches them, and backs up to Railway S3 on close.
+
+    Run with --install to make it start automatically on Windows boot.
+    """
+    if uninstall:
+        _uninstall_startup()
+        return
+
+    config_path = ctx.obj.get("config_path")
+    config = load_config(config_path)
+
+    # Verify Railway S3 is configured
+    if not config.rclone_remote_name or not config.cloud_provider:
+        console.print("[red]Cloud storage not configured. Run 'gsg setup-railway' first.[/red]")
+        raise typer.Exit(1)
+
+    if install:
+        _install_startup()
+        return
+
+    # Scan for non-launcher (Hydra/manual) games
+    from .launcher import detect_launcher, get_all_launcher_games
+
+    console.print("[cyan]Scanning for Hydra/manual games...[/cyan]")
+    ludusavi_path = get_ludusavi_path(config_path)
+    data = scan_games(ludusavi_path)
+    games_data = data.get("games", {})
+    steam_games, epic_games, xbox_games = get_all_launcher_games()
+
+    # Build game list: only non-Steam/Epic/Xbox games
+    existing_games = load_games(config_path)
+    existing_ids = {g.id for g in existing_games}
+    new_games: list[Game] = []
+
+    for title, info in games_data.items():
+        files = info.get("files", {})
+        save_paths = list(files.keys())
+        detected = detect_launcher(title, save_paths, steam_games, epic_games, xbox_games)
+        if detected != "other":
+            continue
+
+        game_id = _slugify(title)
+        if game_id in existing_ids:
+            continue
+
+        game = Game(
+            id=game_id,
+            title=title,
+            platform=_current_platform(),
+            cloud_provider=CloudProvider.S3,
+            auto_sync=True,
+        )
+        new_games.append(game)
+
+    if new_games:
+        all_games = existing_games + new_games
+        save_games(all_games, config_path)
+        console.print(f"[green]Auto-added {len(new_games)} game(s):[/green]")
+        for g in new_games:
+            console.print(f"  - {g.title}")
+    else:
+        console.print("[dim]No new games found. Using existing tracked games.[/dim]")
+
+    # Load all tracked games for watching
+    all_tracked = load_games(config_path)
+    if not all_tracked:
+        console.print("[yellow]No games to watch. Play some games and run 'gsg auto' again.[/yellow]")
+        raise typer.Exit(1)
+
+    db = Database(get_data_dir() / "versions.db")
+
+    def on_start(game: Game, proc_info: object) -> None:
+        console.print(f"[green]Game started: {game.title}[/green]")
+
+    def on_close(game: Game, proc_info: object) -> None:
+        console.print(f"[cyan]Game closed: {game.title}. Backing up to Railway S3...[/cyan]")
+        result = _run_backup(game, config, db, ludusavi_path, label=f"Auto-backup on {datetime.now()}")
+        console.print(f"{'[green]' if result.success else '[red]'}{result.message}[/]")
+        if result.success and result.version and result.files_changed > 0:
+            _cloud_upload(ctx, game, result.version, dry_run=False)
+
+    watcher = GameWatcher(all_tracked)
+    watcher.set_on_game_start(on_start)
+    watcher.set_on_game_close(on_close)
+
+    console.print(f"\n[green]Auto-backup active. Watching {len(all_tracked)} game(s).[/green]")
+    console.print("[dim]Press Ctrl+C to stop. Run 'gsg auto --install' to start on boot.[/dim]\n")
+    try:
+        watcher.watch_loop(interval=interval)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopped watching.[/yellow]")
+
+
+def _install_startup() -> None:
+    """Install gsg auto as a Windows startup (hidden VBS wrapper)."""
+    startup_dir = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    startup_dir.mkdir(parents=True, exist_ok=True)
+
+    vbs_path = startup_dir / "GameSaveGenie.vbs"
+    # Find the gsg executable
+    import sys
+    gsg_path = Path(sys.executable).parent / "gsg.exe"
+    if not gsg_path.exists():
+        # Try to find it in the venv
+        project_venv = Path(__file__).resolve().parents[2] / ".venv" / "Scripts" / "gsg.exe"
+        gsg_path = project_venv if project_venv.exists() else gsg_path
+
+    vbs_content = f'''Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """{gsg_path}"" auto", 0, False
+'''
+    vbs_path.write_text(vbs_content, encoding="utf-8")
+    console.print(f"[green]Installed to Windows startup: {vbs_path}[/green]")
+    console.print("[dim]Game Save Genie will auto-start on boot and back up saves in the background.[/dim]")
+
+
+def _uninstall_startup() -> None:
+    """Remove gsg auto from Windows startup."""
+    startup_dir = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    vbs_path = startup_dir / "GameSaveGenie.vbs"
+    if vbs_path.exists():
+        vbs_path.unlink()
+        console.print(f"[green]Removed from Windows startup: {vbs_path}[/green]")
+    else:
+        console.print("[yellow]Not found in startup.[/yellow]")
+
+
+@app.command()
 def config_cmd(
     ctx: typer.Context,
     backup_dir: Optional[Path] = typer.Option(None, "--backup-dir", help="Set backup directory"),
