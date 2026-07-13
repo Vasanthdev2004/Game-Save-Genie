@@ -346,3 +346,28 @@ def list_remote_versions(
     if result.returncode != 0:
         return []
     return [line.strip("/\r\n") for line in result.stdout.splitlines() if line.strip()]
+
+
+def download_latest_save(
+    binary: Path,
+    game: Game,
+    local_dir: Path,
+    remote_name: str,
+    remote_root: str,
+    extra_args: list[str] | None = None,
+) -> CloudSyncResult:
+    """Download the latest save version from the cloud for a game."""
+    versions = list_remote_versions(binary, game, remote_name, remote_root)
+    if not versions:
+        return CloudSyncResult(
+            success=False,
+            direction="download",
+            message="No cloud saves found for this game",
+            remote_path="",
+        )
+
+    latest = sorted(versions)[-1]
+    return download_save(
+        binary, game, latest, local_dir, remote_name, remote_root,
+        dry_run=False, extra_args=extra_args,
+    )

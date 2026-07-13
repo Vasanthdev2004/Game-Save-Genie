@@ -20,18 +20,24 @@ logger = logging.getLogger(__name__)
 class GameWatcher:
     """Watch for running games and trigger callbacks on start/close."""
 
-    def __init__(self, games: list[Game]) -> None:
+    def __init__(self, games: list[Game], periodic_interval: float = 0) -> None:
         self.games = {g.id: g for g in games}
         self._seen_pids: set[int] = set()
         self._running: dict[str, int] = {}
+        self._last_backup: dict[str, float] = {}
+        self._periodic_interval = periodic_interval
         self.on_game_close: Callable[[Game, ProcessInfo], None] | None = None
         self.on_game_start: Callable[[Game, ProcessInfo], None] | None = None
+        self.on_periodic_backup: Callable[[Game], None] | None = None
 
     def set_on_game_close(self, callback: Callable[[Game, ProcessInfo], None]) -> None:
         self.on_game_close = callback
 
     def set_on_game_start(self, callback: Callable[[Game, ProcessInfo], None]) -> None:
         self.on_game_start = callback
+
+    def set_on_periodic_backup(self, callback: Callable[[Game], None]) -> None:
+        self.on_periodic_backup = callback
 
     def scan(self) -> list[ProcessInfo]:
         """Scan for currently running game processes."""
@@ -46,6 +52,7 @@ class GameWatcher:
     def tick(self) -> None:
         """Process one tick of the watcher loop."""
         currently_running: dict[str, int] = {}
+        now = time.time()
         for game in self.games.values():
             for proc in self._iter_processes():
                 if self._matches_game(proc, game):
@@ -57,6 +64,19 @@ class GameWatcher:
                         if proc_info is not None:
                             logger.info("Game started: %s (pid %d)", game.title, proc.pid)
                             self.on_game_start(game, proc_info)
+                        self._last_backup[game.id] = now
+
+                    # Periodic backup during gameplay
+                    if (
+                        self._periodic_interval > 0
+                        and self.on_periodic_backup is not None
+                        and game.id in self._last_backup
+                        and (now - self._last_backup[game.id]) >= self._periodic_interval
+                    ):
+                        logger.info("Periodic backup: %s", game.title)
+                        self.on_periodic_backup(game)
+                        self._last_backup[game.id] = now
+
                     break
 
         # Detect closed games

@@ -112,6 +112,14 @@ class Database:
             row = conn.execute("SELECT COUNT(*) FROM save_versions").fetchone()
         return int(row[0]) if row else 0
 
+    def get_all_versions(self) -> list[SaveVersion]:
+        """Return all versions across all games, newest first."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM save_versions ORDER BY created_at DESC"
+            ).fetchall()
+        return [self._row_to_version(row) for row in rows]
+
     def update_sync_state(self, game_id: str, version_id: str | None) -> None:
         with self._connection() as conn:
             conn.execute(

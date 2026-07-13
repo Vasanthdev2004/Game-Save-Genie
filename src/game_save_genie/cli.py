@@ -13,6 +13,8 @@ from rich.table import Table
 
 from . import __version__  # noqa: F401
 from .cloud import (
+    _remote_path,
+    download_latest_save,
     get_rclone_path,
     get_remote_size,
     list_remote_versions,
@@ -205,6 +207,99 @@ def list_games(ctx: typer.Context) -> None:
 
 
 @app.command()
+def remove(
+    ctx: typer.Context,
+    game_id: str = typer.Argument(..., help="Game ID to remove"),
+    purge: bool = typer.Option(False, "--purge", help="Also delete local backups and cloud saves"),
+) -> None:
+    """Remove a game from tracking."""
+    config_path = ctx.obj.get("config_path")
+    games = load_games(config_path)
+    game = next((g for g in games if g.id == game_id), None)
+    if not game:
+        console.print(f"[red]Game '{game_id}' not found.[/red]")
+        raise typer.Exit(1)
+
+    games = [g for g in games if g.id != game_id]
+    save_games(games, config_path)
+    console.print(f"[green]Removed: {game.title} ({game_id})[/green]")
+
+    if purge:
+        # Delete local backups
+        config = load_config(config_path)
+        local_backup = config.backup_dir / game_id
+        if local_backup.exists():
+            import shutil
+            shutil.rmtree(local_backup, ignore_errors=True)
+            console.print(f"  [dim]Deleted local backups: {local_backup}[/dim]")
+
+        # Delete cloud saves
+        if game.cloud_provider and config.rclone_remote_name:
+            try:
+                rclone_path = get_rclone_path(config_path)
+                remote = _remote_path(config.rclone_remote_name, config.remote_root, game_id)
+                run_rclone(rclone_path, ["purge", remote], check=False)
+                console.print(f"  [dim]Deleted cloud saves: {remote}[/dim]")
+            except RuntimeError:
+                pass
+
+
+@app.command()
+def status(ctx: typer.Context) -> None:
+    """Show quick overview of tracked games, backups, and cloud sync status."""
+    config_path = ctx.obj.get("config_path")
+    config = load_config(config_path)
+    games = load_games(config_path)
+    db = Database(get_data_dir() / "versions.db")
+
+    if not games:
+        console.print("[yellow]No games tracked. Run 'gsg scan' then 'gsg add'.[/yellow]")
+        return
+
+    table = Table(title="Game Save Genie Status")
+    table.add_column("Game")
+    table.add_column("Versions")
+    table.add_column("Last Backup")
+    table.add_column("Cloud")
+    table.add_column("Cloud Synced")
+
+    for game in games:
+        versions = db.get_versions(game.id)
+        last_backup = "never"
+        cloud_synced = "no"
+        if versions:
+            last_backup = versions[0].created_at.strftime("%Y-%m-%d %H:%M")
+            cloud_synced = "yes" if versions[0].cloud_synced else "pending"
+
+        cloud_status = game.cloud_provider.value if game.cloud_provider else "none"
+        table.add_row(
+            game.title,
+            str(len(versions)),
+            last_backup,
+            cloud_status,
+            cloud_synced,
+        )
+
+    console.print(table)
+
+    # Storage summary
+    local_size = sum(
+        f.stat().st_size for f in config.backup_dir.rglob("*") if f.is_file()
+    ) if config.backup_dir.exists() else 0
+
+    console.print(f"\n[dim]Local backups: {len(db.get_all_versions())} versions, {_human_size(local_size)}[/dim]")
+    if config.rclone_remote_name:
+        try:
+            rclone_path = get_rclone_path(config_path)
+            objects, remote_size = get_remote_size(
+                rclone_path, config.rclone_remote_name, config.remote_root
+            )
+            console.print(f"[dim]Railway cloud: {objects} objects, {_human_size(remote_size)}[/dim]")
+        except RuntimeError:
+            console.print("[dim]Railway cloud: unable to connect[/dim]")
+
+
+@app.command()
 def backup(
     ctx: typer.Context,
     game_id: Optional[str] = typer.Argument(None, help="Game ID to backup (omit for all)"),
@@ -357,6 +452,7 @@ def auto(
     install: bool = typer.Option(False, "--install", help="Add to Windows startup so it runs automatically on boot"),
     uninstall: bool = typer.Option(False, "--uninstall", help="Remove from Windows startup"),
     interval: float = typer.Option(5.0, "--interval", help="Polling interval in seconds"),
+    periodic: float = typer.Option(600.0, "--periodic", help="Periodic backup interval in seconds during gameplay (0=off)"),
 ) -> None:
     """Fully automatic cloud backup. Scans for Hydra/manual games, watches them, and backs up to Railway S3 on close.
 
@@ -428,9 +524,22 @@ def auto(
         raise typer.Exit(1)
 
     db = Database(get_data_dir() / "versions.db")
+    rclone_path = get_rclone_path(config_path)
 
     def on_start(game: Game, proc_info: object) -> None:
         console.print(f"[green]Game started: {game.title}[/green]")
+        # Auto-restore latest cloud save
+        if game.cloud_provider:
+            console.print("[cyan]Checking for cloud saves...[/cyan]")
+            restore_dir = config.backup_dir / game.id / "_cloud_restore"
+            result = download_latest_save(
+                rclone_path, game, restore_dir,
+                config.rclone_remote_name or "", config.remote_root,
+            )
+            if result.success:
+                console.print(f"[green]Restored latest cloud save for {game.title}[/green]")
+            else:
+                console.print(f"[dim]{result.message}[/dim]")
 
     def on_close(game: Game, proc_info: object) -> None:
         console.print(f"[cyan]Game closed: {game.title}. Backing up to Railway S3...[/cyan]")
@@ -439,11 +548,24 @@ def auto(
         if result.success and result.version and result.files_changed > 0:
             _cloud_upload(ctx, game, result.version, dry_run=False)
 
-    watcher = GameWatcher(all_tracked)
+    def on_periodic(game: Game) -> None:
+        console.print(f"[cyan]Periodic backup: {game.title}...[/cyan]")
+        result = _run_backup(game, config, db, ludusavi_path, label=f"Periodic backup on {datetime.now()}")
+        if result.success and result.version and result.files_changed > 0:
+            console.print(f"[green]{result.message}[/green]")
+            _cloud_upload(ctx, game, result.version, dry_run=False)
+        else:
+            console.print(f"[dim]{result.message}[/dim]")
+
+    watcher = GameWatcher(all_tracked, periodic_interval=periodic)
     watcher.set_on_game_start(on_start)
     watcher.set_on_game_close(on_close)
+    if periodic > 0:
+        watcher.set_on_periodic_backup(on_periodic)
 
     console.print(f"\n[green]Auto-backup active. Watching {len(all_tracked)} game(s).[/green]")
+    if periodic > 0:
+        console.print(f"[dim]Periodic backup every {int(periodic)}s during gameplay.[/dim]")
     console.print("[dim]Press Ctrl+C to stop. Run 'gsg auto --install' to start on boot.[/dim]\n")
     try:
         watcher.watch_loop(interval=interval)
