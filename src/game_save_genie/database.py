@@ -107,6 +107,11 @@ class Database:
             )
             conn.commit()
 
+    def count_versions(self) -> int:
+        with self._connection() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM save_versions").fetchone()
+        return int(row[0]) if row else 0
+
     def update_sync_state(self, game_id: str, version_id: str | None) -> None:
         with self._connection() as conn:
             conn.execute(

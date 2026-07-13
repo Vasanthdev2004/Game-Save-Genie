@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -18,6 +19,89 @@ from .models import CloudProvider, CloudSyncResult, Game, SaveVersion
 logger = logging.getLogger(__name__)
 
 RCLONE_RELEASES_URL = "https://api.github.com/repos/rclone/rclone/releases/latest"
+
+
+def get_rclone_config_path() -> Path:
+    """Return the default rclone configuration file path."""
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
+    else:
+        base = Path.home() / ".config"
+    return base / "rclone" / "rclone.conf"
+
+
+def _read_rclone_config() -> dict[str, dict[str, str]]:
+    """Parse rclone.conf into a nested dict."""
+    config_path = get_rclone_config_path()
+    if not config_path.exists():
+        return {}
+
+    sections: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    with config_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("[") and line.endswith("]"):
+                name = line[1:-1]
+                current = {}
+                sections[name] = current
+            elif current is not None and "=" in line:
+                key, value = line.split("=", 1)
+                current[key.strip()] = value.strip()
+    return sections
+
+
+def _write_rclone_config(sections: dict[str, dict[str, str]]) -> None:
+    """Write rclone.conf from a nested dict."""
+    config_path = get_rclone_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8") as f:
+        for name, entries in sections.items():
+            f.write(f"[{name}]\n")
+            for key, value in entries.items():
+                f.write(f"{key} = {value}\n")
+            f.write("\n")
+
+
+def write_railway_s3_config(
+    remote_name: str,
+    endpoint: str,
+    access_key: str,
+    secret_key: str,
+    bucket: str,
+    region: str = "auto",
+) -> Path:
+    """Write an rclone S3 remote config for Railway S3-compatible storage."""
+    sections = _read_rclone_config()
+    sections[remote_name] = {
+        "type": "s3",
+        "provider": "Other",
+        "env_auth": "false",
+        "access_key_id": access_key,
+        "secret_access_key": secret_key,
+        "endpoint": endpoint,
+        "region": region,
+        "bucket": bucket,
+        "force_path_style": "true",
+    }
+    _write_rclone_config(sections)
+    return get_rclone_config_path()
+
+
+def get_remote_size(binary: Path, remote_name: str, remote_root: str) -> tuple[int, int]:
+    """Return (total_objects, total_bytes) for a remote path, or (0,0) on error."""
+    remote_path = f"{remote_name}:{remote_root}"
+    result = run_rclone(binary, ["size", remote_path, "--json"], check=False)
+    if result.returncode != 0:
+        return 0, 0
+    data: dict[str, Any] = {}
+    try:
+        import json
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return 0, 0
+    return int(data.get("count", 0)), int(data.get("bytes", 0))
+
 
 
 def get_rclone_path(config_path: Path | None = None) -> Path:

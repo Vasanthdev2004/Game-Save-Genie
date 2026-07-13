@@ -47,6 +47,8 @@ gsg watch
 
 ## Cloud Setup
 
+### Generic rclone provider
+
 ```bash
 # Configure rclone interactively for your provider
 gsg setup-rclone gdrive
@@ -56,6 +58,24 @@ gsg config --cloud-provider google_drive --remote-root gdrive
 
 # Back up a game and upload to cloud automatically
 gsg backup elden-ring
+```
+
+### Railway S3 (Hobby Plan includes 5 GB)
+
+```bash
+# Install Railway CLI locally (already included if you cloned this repo)
+npm install @railway/cli
+
+# Create a bucket in the Railway dashboard and get S3 credentials
+# Then run the interactive setup
+gsg setup-railway
+
+# It will ask for: endpoint, access key, secret key, bucket name
+# After setup, backups go straight to your Railway bucket
+gsg backup elden-ring
+
+# Check how much of your 5 GB is used
+gsg usage
 ```
 
 ## Configuration

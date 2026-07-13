@@ -29,3 +29,8 @@ config.json
 .env
 backups/
 *.bak
+
+# Railway CLI (installed locally via npm)
+node_modules/
+package.json
+package-lock.json

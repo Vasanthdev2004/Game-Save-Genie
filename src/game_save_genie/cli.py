@@ -14,9 +14,11 @@ from rich.table import Table
 from . import __version__  # noqa: F401
 from .cloud import (
     get_rclone_path,
+    get_remote_size,
     list_remote_versions,
     run_rclone,
     upload_save,
+    write_railway_s3_config,
 )
 from .config import (
     get_config_path,
@@ -349,6 +351,58 @@ def setup_rclone(
     console.print(f"[cyan]Launching rclone config for remote '{remote_name}'...[/cyan]")
     console.print("Follow the interactive prompts. When done, set the remote name with --remote.")
     run_rclone(rclone_path, ["config"], capture_output=False, check=False)
+
+
+@app.command()
+def setup_railway(
+    ctx: typer.Context,
+    remote_name: str = typer.Argument(default="railway", help="Name for the rclone remote"),
+    endpoint: str = typer.Option(..., prompt=True, help="Railway S3 endpoint URL"),
+    access_key: str = typer.Option(..., prompt=True, hide_input=True, help="Access key"),
+    secret_key: str = typer.Option(..., prompt=True, hide_input=True, help="Secret key"),
+    bucket: str = typer.Option(..., prompt=True, help="Bucket name"),
+    region: str = typer.Option("auto", help="Region"),
+) -> None:
+    """Configure rclone for Railway S3-compatible storage."""
+    config_path = ctx.obj.get("config_path") or get_config_path()
+    config = load_config(config_path)
+    config_path_obj = write_railway_s3_config(remote_name, endpoint, access_key, secret_key, bucket, region)
+    config.cloud_provider = CloudProvider.S3
+    config.remote_root = remote_name
+    save_config(config, config_path)
+    console.print(f"[green]Railway S3 remote '{remote_name}' configured.[/green]")
+    console.print(f"rclone config written to: {config_path_obj}")
+    console.print("Test it with: gsg backup <game-id>")
+
+
+@app.command()
+def usage(ctx: typer.Context) -> None:
+    """Show local backup and remote storage usage."""
+    config_path = ctx.obj.get("config_path")
+    config = load_config(config_path)
+    db = Database(get_data_dir() / "versions.db")
+
+    local_size = sum(
+        f.stat().st_size for f in config.backup_dir.rglob("*") if f.is_file()
+    )
+    version_count = db.count_versions()
+
+    table = Table(title="Storage Usage")
+    table.add_column("Location")
+    table.add_column("Objects")
+    table.add_column("Size")
+    table.add_row("Local backups", str(version_count), _human_size(local_size))
+
+    if config.cloud_provider and config.remote_root:
+        try:
+            rclone_path = get_rclone_path(config_path)
+            remote_name = config.remote_root
+            objects, remote_size = get_remote_size(rclone_path, remote_name, "")
+            table.add_row("Remote storage", str(objects), _human_size(remote_size))
+        except RuntimeError as exc:
+            table.add_row("Remote storage", "error", str(exc))
+
+    console.print(table)
 
 
 def _run_backup(
