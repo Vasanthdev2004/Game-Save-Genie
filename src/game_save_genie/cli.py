@@ -269,7 +269,7 @@ def cloud_list(
         raise typer.Exit(1)
 
     rclone_path = get_rclone_path(config_path)
-    remote_name = game.remote_path or config.remote_root
+    remote_name = game.remote_path or config.rclone_remote_name or config.remote_root
     version_ids = list_remote_versions(rclone_path, game, remote_name, config.remote_root)
     if not version_ids:
         console.print("[yellow]No cloud versions found.[/yellow]")
@@ -313,7 +313,8 @@ def config_cmd(
     backup_dir: Optional[Path] = typer.Option(None, "--backup-dir", help="Set backup directory"),
     max_versions: Optional[int] = typer.Option(None, "--max-versions", help="Max versions to keep"),
     cloud_provider: Optional[CloudProvider] = typer.Option(None, "--cloud-provider", help="Default cloud provider"),
-    remote_root: Optional[str] = typer.Option(None, "--remote-root", help="Remote root path"),
+    rclone_remote_name: Optional[str] = typer.Option(None, "--rclone-remote", help="Name of the rclone remote"),
+    remote_root: Optional[str] = typer.Option(None, "--remote-root", help="Remote root path or bucket"),
     ludusavi_path: Optional[Path] = typer.Option(None, "--ludusavi", help="Path to ludusavi binary"),
     rclone_path: Optional[Path] = typer.Option(None, "--rclone", help="Path to rclone binary"),
 ) -> None:
@@ -326,6 +327,8 @@ def config_cmd(
         config.max_versions = max_versions
     if cloud_provider:
         config.cloud_provider = cloud_provider
+    if rclone_remote_name:
+        config.rclone_remote_name = rclone_remote_name
     if remote_root:
         config.remote_root = remote_root
     if ludusavi_path:
@@ -337,6 +340,7 @@ def config_cmd(
     console.print(f"backup_dir: {config.backup_dir}")
     console.print(f"max_versions: {config.max_versions}")
     console.print(f"cloud_provider: {config.cloud_provider}")
+    console.print(f"rclone_remote_name: {config.rclone_remote_name}")
     console.print(f"remote_root: {config.remote_root}")
 
 
@@ -368,7 +372,8 @@ def setup_railway(
     config = load_config(config_path)
     config_path_obj = write_railway_s3_config(remote_name, endpoint, access_key, secret_key, bucket, region)
     config.cloud_provider = CloudProvider.S3
-    config.remote_root = remote_name
+    config.rclone_remote_name = remote_name
+    config.remote_root = bucket
     save_config(config, config_path)
     console.print(f"[green]Railway S3 remote '{remote_name}' configured.[/green]")
     console.print(f"rclone config written to: {config_path_obj}")
@@ -393,11 +398,12 @@ def usage(ctx: typer.Context) -> None:
     table.add_column("Size")
     table.add_row("Local backups", str(version_count), _human_size(local_size))
 
-    if config.cloud_provider and config.remote_root:
+    if config.cloud_provider and config.rclone_remote_name:
         try:
             rclone_path = get_rclone_path(config_path)
-            remote_name = config.remote_root
-            objects, remote_size = get_remote_size(rclone_path, remote_name, "")
+            objects, remote_size = get_remote_size(
+                rclone_path, config.rclone_remote_name, config.remote_root
+            )
             table.add_row("Remote storage", str(objects), _human_size(remote_size))
         except RuntimeError as exc:
             table.add_row("Remote storage", "error", str(exc))
@@ -439,7 +445,10 @@ def _cloud_upload(
     if not provider:
         return
     rclone_path = get_rclone_path(config_path)
-    remote_name = game.remote_path or config.remote_root
+    remote_name = game.remote_path or config.rclone_remote_name
+    if not remote_name:
+        console.print("[red]No rclone remote configured.[/red]")
+        return
     result = upload_save(
         rclone_path,
         game,

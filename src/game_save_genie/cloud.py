@@ -82,7 +82,7 @@ def write_railway_s3_config(
         "endpoint": endpoint,
         "region": region,
         "bucket": bucket,
-        "force_path_style": "true",
+        "force_path_style": "false",
     }
     _write_rclone_config(sections)
     return get_rclone_config_path()
@@ -133,7 +133,7 @@ def download_rclone(target_dir: Path) -> Path:
 
     logger.info("Downloading rclone...")
     release_info = requests.get(RCLONE_RELEASES_URL, timeout=30).json()
-    asset_name = _rclone_asset_name()
+    asset_name = _rclone_asset_name(release_info)
     asset_url: str | None = None
     for asset in release_info.get("assets", []):
         if asset["name"] == asset_name:
@@ -174,14 +174,22 @@ def download_rclone(target_dir: Path) -> Path:
     return binary_path
 
 
-def _rclone_asset_name() -> str:
-    """Return the rclone asset name for the current platform."""
-    if os.name == "nt":
-        return "rclone-v1.68.2-windows-amd64.zip"
+def _rclone_asset_name(release_info: dict[str, Any]) -> str:
+    """Return the rclone asset name for the current platform from the release."""
     import platform
-    if platform.system() == "Darwin":
-        return "rclone-v1.68.2-osx-amd64.zip"
-    return "rclone-v1.68.2-linux-amd64.tar.gz"
+    if os.name == "nt":
+        suffix = "windows-amd64.zip"
+    elif platform.system() == "Darwin":
+        suffix = "osx-amd64.zip"
+    else:
+        suffix = "linux-amd64.tar.gz"
+
+    for asset in release_info.get("assets", []):
+        name = str(asset.get("name", ""))
+        if name.startswith("rclone-v") and name.endswith(suffix):
+            return name
+    raise RuntimeError(f"Could not find rclone asset for {suffix}")
+
 
 
 def run_rclone(
@@ -225,6 +233,15 @@ def configure_remote(
     )
 
 
+def _remote_path(remote_name: str, remote_root: str, *parts: str) -> str:
+    """Build an rclone remote path, avoiding leading slashes when remote_root is empty."""
+    suffix = "/".join(parts).lstrip("/")
+    if remote_root:
+        prefix = remote_root.rstrip("/")
+        return f"{remote_name}:{prefix}/{suffix}"
+    return f"{remote_name}:{suffix}"
+
+
 def upload_save(
     binary: Path,
     game: Game,
@@ -235,7 +252,7 @@ def upload_save(
     extra_args: list[str] | None = None,
 ) -> CloudSyncResult:
     """Upload a save version to the configured cloud provider."""
-    remote_path = f"{remote_name}:{remote_root}/{game.id}/{version.id}"
+    remote_path = _remote_path(remote_name, remote_root, game.id, version.id)
     args = ["copy", str(version.local_path), remote_path, "--progress"]
     if dry_run:
         args.append("--dry-run")
@@ -266,7 +283,7 @@ def download_save(
     extra_args: list[str] | None = None,
 ) -> CloudSyncResult:
     """Download a save version from the cloud."""
-    remote_path = f"{remote_name}:{remote_root}/{game.id}/{version_id}"
+    remote_path = _remote_path(remote_name, remote_root, game.id, version_id)
     local_dir.mkdir(parents=True, exist_ok=True)
     args = ["copy", remote_path, str(local_dir), "--progress"]
     if dry_run:
@@ -297,7 +314,7 @@ def sync_bidirectional(
     extra_args: list[str] | None = None,
 ) -> CloudSyncResult:
     """Bidirectional sync between local and cloud for a game."""
-    remote_path = f"{remote_name}:{remote_root}/{game.id}"
+    remote_path = _remote_path(remote_name, remote_root, game.id)
     args = ["bisync", str(local_dir), remote_path, "--resync", "--progress"]
     if dry_run:
         args.append("--dry-run")
@@ -324,7 +341,7 @@ def list_remote_versions(
     remote_root: str,
 ) -> list[str]:
     """List available version IDs stored in the cloud for a game."""
-    remote_path = f"{remote_name}:{remote_root}/{game.id}"
+    remote_path = _remote_path(remote_name, remote_root, game.id)
     result = run_rclone(binary, ["lsf", remote_path, "--dirs-only"], check=False)
     if result.returncode != 0:
         return []

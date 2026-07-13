@@ -46,7 +46,7 @@ def download_ludusavi(target_dir: Path) -> Path:
 
     logger.info("Downloading Ludusavi...")
     release_info = requests.get(LUDUSAVI_RELEASES_URL, timeout=30).json()
-    asset_name = _ludusavi_asset_name()
+    asset_name = _ludusavi_asset_name(release_info)
     asset_url: str | None = None
     for asset in release_info.get("assets", []):
         if asset["name"] == asset_name:
@@ -83,14 +83,21 @@ def download_ludusavi(target_dir: Path) -> Path:
     return binary_path
 
 
-def _ludusavi_asset_name() -> str:
-    """Return the asset name for the current platform."""
+def _ludusavi_asset_name(release_info: dict[str, Any]) -> str:
+    """Return the asset name for the current platform from the release."""
     import platform
     if os.name == "nt":
-        return "ludusavi-win64.zip"
-    if platform.system() == "Darwin":
-        return "ludusavi-macos.tar.gz"
-    return "ludusavi-linux-x64.tar.gz"
+        suffix = "win64.zip"
+    elif platform.system() == "Darwin":
+        suffix = "mac.tar.gz"
+    else:
+        suffix = "linux.tar.gz"
+
+    for asset in release_info.get("assets", []):
+        name = str(asset.get("name", ""))
+        if name.startswith("ludusavi-") and name.endswith(suffix):
+            return name
+    raise RuntimeError(f"Could not find Ludusavi asset for {suffix}")
 
 
 def run_ludusavi(

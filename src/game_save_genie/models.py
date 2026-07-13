@@ -83,6 +83,7 @@ class SyncConfig(BaseModel):
     dry_run_default: bool = False
     custom_rclone_args: list[str] = Field(default_factory=list)
     cloud_provider: CloudProvider | None = None
+    rclone_remote_name: str | None = None
     remote_root: str = "game-save-genie"
     ludusavi_path: Path | None = None
     rclone_path: Path | None = None
