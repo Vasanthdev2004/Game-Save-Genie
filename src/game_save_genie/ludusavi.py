@@ -176,7 +176,12 @@ def backup_game(
         return BackupResult(success=False, game_id=game.id, message=str(exc))
 
     data = json.loads(result.stdout)
-    files_changed = data.get("overall", {}).get("changed", {}).get("files", 0)
+    files_data = data.get("games", {}).get(game.title, {}).get("files", {})
+
+    # Ludusavi marks each file as "New", "Different", or "Same".
+    files_changed = sum(
+        1 for f in files_data.values() if f.get("change") in ("New", "Different")
+    )
     if files_changed == 0:
         return BackupResult(
             success=True,
@@ -186,11 +191,8 @@ def backup_game(
         )
 
     # Build version metadata from the Ludusavi output.
-    file_count = 0
-    size_bytes = 0
-    for file_info in data.get("games", {}).get(game.title, {}).get("files", {}).values():
-        file_count += 1
-        size_bytes += int(file_info.get("size", 0))
+    file_count = len(files_data)
+    size_bytes = sum(int(f.get("bytes", 0)) for f in files_data.values())
 
     from datetime import datetime, timezone
     from .config import get_machine_id

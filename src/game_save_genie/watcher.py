@@ -131,9 +131,19 @@ class GameWatcher:
                 closed_game = self.games.get(game_id)
                 if closed_game is not None and self.on_game_close is not None:
                     proc_info = self._process_info_from_pid(pid)
-                    if proc_info is not None:
-                        logger.info("Game closed: %s (pid %d)", closed_game.title, pid)
-                        self.on_game_close(closed_game, proc_info)
+                    if proc_info is None:
+                        # Process already exited; create a stub so the
+                        # close callback (which does the backup) still fires.
+                        proc_info = ProcessInfo(
+                            pid=pid,
+                            name="",
+                            exe="",
+                            status="terminated",
+                            create_time=datetime.now(tz=timezone.utc),
+                            environ={},
+                        )
+                    logger.info("Game closed: %s (pid %d)", closed_game.title, pid)
+                    self.on_game_close(closed_game, proc_info)
 
         self._running = currently_running
 
@@ -178,16 +188,28 @@ class GameWatcher:
     def _process_info_from_pid(self, pid: int) -> ProcessInfo | None:
         try:
             proc = psutil.Process(pid)
-            return ProcessInfo(
-                pid=pid,
-                name=proc.name(),
-                exe=proc.exe(),
-                status=proc.status(),
-                create_time=datetime.fromtimestamp(proc.create_time(), tz=timezone.utc),
-                environ=proc.environ(),
-            )
+            name = proc.name()
+            exe = proc.exe()
+            status = proc.status()
+            create_time = datetime.fromtimestamp(proc.create_time(), tz=timezone.utc)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return None
+
+        # environ() commonly raises AccessDenied on Windows; don't let it
+        # prevent us from returning the info we already have.
+        try:
+            environ = proc.environ()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            environ = {}
+
+        return ProcessInfo(
+            pid=pid,
+            name=name,
+            exe=exe,
+            status=status,
+            create_time=create_time,
+            environ=environ,
+        )
 
     def _detect_wine_prefix(self, proc: psutil.Process) -> Path | None:
         """Try to detect the Steam/Wine prefix from process environment."""
