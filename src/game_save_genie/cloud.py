@@ -319,7 +319,12 @@ def download_save(
     legacy nested ``<id>.zip/<id>.zip`` directories, and legacy uncompressed
     ``<id>/`` directories.
     """
-    entries = list_remote_version_entries(binary, game, remote_name, remote_root)
+    try:
+        entries = list_remote_version_entries(binary, game, remote_name, remote_root)
+    except RuntimeError as exc:
+        return CloudSyncResult(
+            success=False, direction="download", message=str(exc), remote_path=""
+        )
     raw_entry = next((raw for vid, raw in entries if vid == version_id), None)
     if raw_entry is None:
         return CloudSyncResult(
@@ -417,11 +422,23 @@ def list_remote_version_entries(
     remote_name: str,
     remote_root: str,
 ) -> list[tuple[str, str]]:
-    """List cloud versions for a game as ``(version_id, raw_entry)`` pairs."""
+    """List cloud versions for a game as ``(version_id, raw_entry)`` pairs.
+
+    Returns [] only when the listing genuinely holds no versions (including
+    rclone exit 3, "directory not found" — a game never uploaded). Any other
+    rclone failure raises RuntimeError so callers can tell an unreachable
+    remote apart from an empty one — treating "cloud unreachable" as "no
+    cloud versions" would silently disable restores.
+    """
     remote_path = _remote_path(remote_name, remote_root, game.id)
     result = run_rclone(binary, ["lsf", remote_path], check=False)
-    if result.returncode != 0:
+    if result.returncode == 3:
         return []
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"rclone lsf failed (exit {result.returncode}): "
+            f"{(result.stderr or result.stdout or '').strip()}"
+        )
     return parse_lsf_entries(result.stdout)
 
 
@@ -462,7 +479,11 @@ def prune_remote_versions(
     newest version is never deleted, and individual delete failures are
     logged but never raised. Returns the version ids actually deleted.
     """
-    entries = list_remote_version_entries(binary, game, remote_name, remote_root)
+    try:
+        entries = list_remote_version_entries(binary, game, remote_name, remote_root)
+    except RuntimeError as exc:
+        logger.warning("Skipping cloud prune for %s: %s", game.id, exc)
+        return []
     deleted: list[str] = []
     for version_id, raw_entry in select_entries_to_prune(entries, keep):
         if raw_entry.endswith("/"):

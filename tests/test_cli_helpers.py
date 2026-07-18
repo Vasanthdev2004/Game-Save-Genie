@@ -50,6 +50,81 @@ def test_version_flag(tmp_path: Path) -> None:
     assert "Game Save Genie" in result.output
 
 
+def test_pull_requires_game_or_all(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["--config", str(tmp_path / "c.yaml"), "pull"])
+    assert result.exit_code == 1
+    assert "--all" in result.output
+
+
+class _IdleWatcher:
+    """GameWatcher stand-in: nothing is ever running (keeps tests hermetic)."""
+
+    def __init__(self, games: object, **kwargs: object) -> None:
+        pass
+
+    def prime(self) -> None:
+        pass
+
+    def is_running(self, game_id: str) -> bool:
+        return False
+
+    def running_process_info(self, game_id: str) -> None:
+        return None
+
+
+def test_pull_dry_run_reports_newer_cloud_version(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import pytest
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    cfg = str(tmp_path / "c.yaml")
+    runner.invoke(
+        app,
+        ["--config", cfg, "add", "Pull Wiring Test", "--cloud", "s3", "--remote", "r"],
+    )
+    monkeypatch.setattr("game_save_genie.cli.get_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr("game_save_genie.cli.GameWatcher", _IdleWatcher)
+    monkeypatch.setattr(
+        "game_save_genie.cli.list_remote_versions",
+        lambda *a, **k: ["20990101-000000-000000"],
+    )
+    monkeypatch.setattr("game_save_genie.cli.get_rclone_path", lambda p: Path("rclone"))
+    monkeypatch.setattr("game_save_genie.cli.get_ludusavi_path", lambda p: Path("ludusavi"))
+
+    result = runner.invoke(
+        app, ["--config", cfg, "pull", "pull-wiring-test", "--dry-run"]
+    )
+    assert result.exit_code == 0
+    assert "Would restore" in result.output
+    assert "20990101-000000-000000" in result.output
+
+
+def test_pull_listing_failure_exits_nonzero(tmp_path: Path, monkeypatch: object) -> None:
+    """An unreachable cloud must be an error, not 'no cloud versions'."""
+    import pytest
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    cfg = str(tmp_path / "c.yaml")
+    runner.invoke(
+        app,
+        ["--config", cfg, "add", "Pull Err Test", "--cloud", "s3", "--remote", "r"],
+    )
+
+    def boom(*a: object, **k: object) -> list[str]:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("game_save_genie.cli.get_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr("game_save_genie.cli.GameWatcher", _IdleWatcher)
+    monkeypatch.setattr("game_save_genie.cli.list_remote_versions", boom)
+    monkeypatch.setattr("game_save_genie.cli.get_rclone_path", lambda p: Path("rclone"))
+    monkeypatch.setattr("game_save_genie.cli.get_ludusavi_path", lambda p: Path("ludusavi"))
+
+    result = runner.invoke(app, ["--config", cfg, "pull", "pull-err-test"])
+    assert result.exit_code == 1
+    assert "cloud listing failed" in result.output
+
+
 def test_slugify_matches_legacy_scheme() -> None:
     """Ids must stay byte-identical to those in existing games.yaml files —
     a changed scheme would re-add every tracked game under a new id."""

@@ -8,6 +8,7 @@ Self-hosted cloud save sync for PC games that don't have their own — Hydra and
 - **Real save versioning**: every backup is frozen into an immutable per-version zip with a SHA-256 checksum — roll back to any play session with `gsg restore --version`.
 - **Cloud retention**: `max_versions` is enforced both locally and in the cloud, so your bucket doesn't grow forever.
 - **Safety-first restores**: every restore (manual or automatic) verifies the snapshot's integrity first, then takes a safety backup of your current saves before touching anything. A failed download or restore changes nothing and retries cleanly.
+- **Cross-machine sync** (`gsg pull`): set up the same cloud on a second PC and pull your saves down — paths recorded under a different Windows username are remapped to the new machine automatically.
 - **Launcher filtering**: Steam/Epic/Xbox games are detected and skipped by default — those launchers already sync saves.
 - **Run at boot**: `gsg auto --install` starts the watcher automatically on Windows startup.
 
@@ -55,7 +56,9 @@ gsg list                    # Tracked games
 gsg backup [game-id]        # Back up one or all games (--dry-run previews, changes nothing)
 gsg versions <game-id>      # List local versions
 gsg cloud-list <game-id>    # List cloud versions
-gsg restore <game-id> [--version ID]       # Restore latest or a specific version
+gsg restore <game-id> [--version ID]       # Restore latest or a specific local version
+gsg pull <game-id> [--version ID]          # Restore from the CLOUD (cross-machine)
+gsg pull --all              # Catch this machine up on every game that is behind
 gsg status                  # Per-game overview + storage usage and quota warning
 gsg usage                   # Local + remote storage totals
 gsg pause / resume <game-id>  # Exclude/re-include a game from auto-backup
@@ -73,6 +76,10 @@ gsg setup-rclone x    # anything else rclone supports, configured interactively
 ```
 
 The remote layout is `<remote>:<remote_root>/<game-id>/<version-id>.zip` — one compressed object per version.
+
+## Playing on two machines
+
+Run the same setup (`gsg`, same cloud account) on both PCs. `gsg auto` keeps each machine backed up and pulls newer cloud saves at startup and while a game isn't running; `gsg pull --all` catches a machine up on demand, and `gsg pull <game> --version <id>` fetches any specific session. Backups record which machine made them (`gsg versions`), restores only ever apply a strictly-newer cloud save unless you `--force`, a safety backup is taken before every restore, and saves made under a different Windows username are path-remapped to the machine doing the restoring.
 
 ## Configuration
 
@@ -107,7 +114,7 @@ src/game_save_genie/
   watcher.py        # psutil process watcher (start/close/periodic callbacks)
   launcher.py       # Steam/Epic/Xbox detection for scan filtering
   notify.py         # Rotating file log + Windows toast notifications
-  remap.py          # Cross-platform path remapping (groundwork for gsg pull)
+  remap.py          # Cross-machine path remapping applied by pull/auto-restore
 ```
 
 ## Development

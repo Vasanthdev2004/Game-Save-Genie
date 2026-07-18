@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import IO, Optional
 
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -53,7 +54,7 @@ from .models import (
     SyncConfig,
 )
 from .notify import notify, setup_file_logging
-from .remap import _current_platform
+from .remap import _current_platform, apply_remap_to_staged_backup
 from .sync import effective_local_latest, latest_version_id, should_restore_from_cloud
 from .watcher import GameWatcher
 
@@ -506,12 +507,151 @@ def cloud_list(
         console.print("[red]No rclone remote configured. Run 'gsg setup-railway' first.[/red]")
         raise typer.Exit(1)
     rclone_path = get_rclone_path(config_path)
-    version_ids = list_remote_versions(rclone_path, game, remote_name, config.remote_root)
+    try:
+        version_ids = list_remote_versions(rclone_path, game, remote_name, config.remote_root)
+    except RuntimeError as exc:
+        console.print(f"[red]Cloud listing failed: {exc}[/red]")
+        raise typer.Exit(1) from exc
     if not version_ids:
         console.print("[yellow]No cloud versions found.[/yellow]")
         return
     for vid in version_ids:
         console.print(vid)
+
+
+@app.command()
+def pull(
+    ctx: typer.Context,
+    game_id: Optional[str] = typer.Argument(None, help="Game ID to pull (omit with --all)"),
+    version_id: Optional[str] = typer.Option(
+        None, "--version", help="Cloud version ID (omit for latest; see 'gsg cloud-list')"
+    ),
+    all_games: bool = typer.Option(
+        False, "--all", help="Catch up every tracked cloud game that is behind"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Restore even when the local save is newer than the cloud"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen"),
+) -> None:
+    """Pull a save down from the cloud and apply it — the cross-machine restore.
+
+    On a machine that is behind (or a fresh machine), this downloads the
+    cloud save, remaps paths recorded under another username to this
+    machine, takes a safety backup, and applies it.
+    """
+    if bool(game_id) == all_games:
+        console.print("[red]Specify a game ID, or use --all.[/red]")
+        raise typer.Exit(1)
+    if all_games and version_id:
+        console.print("[red]--version needs a specific game ID, not --all.[/red]")
+        raise typer.Exit(1)
+
+    config_path = ctx.obj.get("config_path")
+    config = load_config(config_path)
+    games = load_games(config_path)
+    db = Database(get_data_dir() / "versions.db")
+
+    targets = games if all_games else [g for g in games if g.id == game_id]
+    if not all_games and not targets:
+        console.print(f"[red]Game not found: {game_id}[/red]")
+        raise typer.Exit(1)
+    if all_games:
+        # --all respects pause; an explicitly named game does not.
+        paused = [g for g in targets if not (g.auto_sync and g.sync_enabled)]
+        for g in paused:
+            console.print(f"[dim]{g.title}: paused — skipped (pull it by id to override).[/dim]")
+        targets = [g for g in targets if g.auto_sync and g.sync_enabled]
+    cloud_targets = [
+        g for g in targets
+        if g.cloud_provider and (g.remote_path or config.rclone_remote_name)
+    ]
+    if not cloud_targets:
+        console.print(
+            "[red]No cloud-enabled game to pull. Configure cloud storage with 'gsg' "
+            "or set a provider with 'gsg add --cloud'.[/red]"
+        )
+        raise typer.Exit(1)
+
+    rclone_path = get_rclone_path(config_path)
+    ludusavi_path = get_ludusavi_path(config_path)
+
+    # Never restore underneath a live process.
+    probe = GameWatcher(cloud_targets)
+    probe.prime()
+
+    pulled = 0
+    failed = 0
+    skipped_running = 0
+    for game in cloud_targets:
+        if probe.is_running(game.id):
+            proc_info = probe.running_process_info(game.id)
+            matched = f" (matched: {proc_info.exe or proc_info.name})" if proc_info else ""
+            if force and not all_games:
+                console.print(
+                    f"[yellow]{game.title}: appears to be running{matched} — "
+                    f"proceeding anyway (--force).[/yellow]"
+                )
+            else:
+                console.print(
+                    f"[yellow]{game.title}: game is running{matched} — close it and "
+                    f"retry, or use --force if this match is wrong. Skipped.[/yellow]"
+                )
+                skipped_running += 1
+                continue
+
+        remote_name = game.remote_path or config.rclone_remote_name
+        assert remote_name is not None  # filtered above
+        cloud_latest: Optional[str] = None
+        if not (version_id and force):
+            try:
+                cloud_ids = list_remote_versions(
+                    rclone_path, game, remote_name, config.remote_root
+                )
+            except RuntimeError as exc:
+                console.print(f"[red]{game.title}: cloud listing failed: {exc}[/red]")
+                failed += 1
+                continue
+            cloud_latest = latest_version_id(cloud_ids)
+        if version_id:
+            target_version = version_id
+        else:
+            if cloud_latest is None:
+                console.print(f"[dim]{game.title}: no cloud versions.[/dim]")
+                continue
+            if not force:
+                local_latest = db.get_latest_version_id(game.id, exclude_safety=True)
+                effective = effective_local_latest(local_latest, db.get_sync_state(game.id))
+                if not should_restore_from_cloud(effective, cloud_latest):
+                    hint = "" if all_games else " Use --force or --version <id> to restore anyway."
+                    console.print(f"[dim]{game.title}: already up to date.{hint}[/dim]")
+                    continue
+            target_version = cloud_latest
+
+        if dry_run:
+            console.print(
+                f"[cyan]Would restore {game.title} from cloud version {target_version}[/cyan]"
+            )
+            continue
+        if _apply_cloud_version(
+            game, config, db, rclone_path, ludusavi_path, target_version
+        ):
+            pulled += 1
+            if version_id and cloud_latest and cloud_latest > target_version:
+                # Deliberately pulling an OLD version is a decision over
+                # everything currently in the cloud — record the newest id
+                # as seen so gsg auto does not immediately overwrite the
+                # user's choice with the latest.
+                _record_applied_cloud_version(db, game.id, cloud_latest)
+        else:
+            failed += 1
+
+    if all_games and not dry_run:
+        console.print(f"\n[green]Pulled {pulled} game(s).[/green]" + (
+            f" [red]{failed} failed.[/red]" if failed else ""
+        ))
+    if failed or (skipped_running and not all_games):
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -1433,34 +1573,65 @@ def _auto_restore_if_idle(
     """Apply the latest cloud save when it is newer — ONLY for a game that is
     not currently running (callers guarantee that; restoring under a live
     process would race the game's own save writes).
-
-    Ordering is deliberate: download and verify FIRST, then the safety
-    backup, then apply — and the restore is aborted if the safety backup
-    fails, so local progress is never overwritten without a recoverable
-    copy. A failed step changes no state and is retried at the next idle
-    check. The applied cloud version is recorded in sync_state.
     """
     cloud_latest = _cloud_newer_version(game, config, db, rclone_path)
     if cloud_latest is None:
         return
+    console.print(f"[cyan]{game.title}: cloud has a newer save. Downloading...[/cyan]")
+    _apply_cloud_version(game, config, db, rclone_path, ludusavi_path, cloud_latest)
+
+
+def _apply_cloud_version(
+    game: Game,
+    config: SyncConfig,
+    db: Database,
+    rclone_path: Path,
+    ludusavi_path: Path,
+    version_id: str,
+) -> bool:
+    """Download, verify, remap, and restore one cloud version.
+
+    Ordering is deliberate: download and verify FIRST, then remap paths for
+    this machine, then the safety backup, then apply — and the restore is
+    aborted if the safety backup fails, so local progress is never
+    overwritten without a recoverable copy. A failed step changes no state.
+    The applied cloud version is recorded in sync_state so automatic
+    restore never re-applies it.
+    """
     remote_name = game.remote_path or config.rclone_remote_name
     if not remote_name:
-        return
+        return False
 
-    console.print(f"[cyan]{game.title}: cloud has a newer save. Downloading...[/cyan]")
     restore_dir = _cloud_restore_dir(game.id)
     _reset_dir(restore_dir)
     result = download_save(
-        rclone_path, game, cloud_latest, restore_dir, remote_name, config.remote_root
+        rclone_path, game, version_id, restore_dir, remote_name, config.remote_root
     )
     if not result.success:
         console.print(f"[red]{result.message}[/red]")
-        return
-    if not any(restore_dir.rglob("mapping.yaml")):
+        return False
+    mapping_files = list(restore_dir.rglob("mapping.yaml"))
+    if not mapping_files:
         console.print(
             f"[red]{game.title}: downloaded save has no Ludusavi mapping.yaml; not restoring.[/red]"
         )
-        return
+        return False
+
+    # Cross-machine: a backup made under another Windows username records
+    # that user's profile paths — rewrite them (and the mirrored files) for
+    # this machine before Ludusavi applies them.
+    try:
+        remapped = sum(
+            apply_remap_to_staged_backup(mp.parent) for mp in mapping_files
+        )
+    except (OSError, RuntimeError, yaml.YAMLError) as exc:
+        console.print(
+            f"[red]{game.title}: could not remap save paths for this machine "
+            f"({exc}); not restoring.[/red]"
+        )
+        return False
+    if remapped:
+        console.print(f"[dim]Remapped {remapped} save path(s) for this machine.[/dim]")
 
     # Download verified — secure the current on-disk state before applying.
     # If that fails, DO NOT restore: overwriting the only copy of local
@@ -1474,17 +1645,26 @@ def _auto_restore_if_idle(
             f"[red]{game.title}: safety backup failed ({safety.message}); "
             f"cloud restore skipped.[/red]"
         )
-        return
+        return False
 
     try:
         restore_from_backup(ludusavi_path, game, restore_dir)
     except RuntimeError as exc:
         console.print(f"[red]Restore failed for {game.title}: {exc}[/red]")
-        return
+        return False
 
-    db.update_sync_state(game.id, cloud_latest)
+    _record_applied_cloud_version(db, game.id, version_id)
     notify("Cloud save restored", game.title)
-    console.print(f"[green]Restored latest cloud save for {game.title}[/green]")
+    console.print(f"[green]Restored {game.title} from cloud version {version_id}[/green]")
+    return True
+
+
+def _record_applied_cloud_version(db: Database, game_id: str, version_id: str) -> None:
+    """Advance sync_state to the applied version — never backwards, so
+    deliberately pulling an old version cannot make auto-restore loop."""
+    current = db.get_sync_state(game_id)
+    if current is None or version_id > current:
+        db.update_sync_state(game_id, version_id)
 
 
 def _slugify(text: str) -> str:

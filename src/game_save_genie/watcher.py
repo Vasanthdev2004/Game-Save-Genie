@@ -110,6 +110,10 @@ class GameWatcher:
         """The set of pids currently matched to this game."""
         return set(self._running.get(game_id, set()))
 
+    def running_process_info(self, game_id: str) -> ProcessInfo | None:
+        """Info for one process currently matched to this game, if any."""
+        return self._first_process_info(self._running.get(game_id, set()))
+
     def scan(self) -> list[ProcessInfo]:
         """Scan for currently running game processes."""
         found: list[ProcessInfo] = []
