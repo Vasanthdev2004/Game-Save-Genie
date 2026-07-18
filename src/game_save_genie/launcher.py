@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,8 @@ def get_steam_games() -> set[str]:
 
 def _find_steam_path() -> Path | None:
     """Find the Steam installation directory."""
-    if os.name != "nt":
+    # sys.platform (not os.name) so mypy skips the winreg block on non-Windows.
+    if sys.platform != "win32":
         return None
 
     try:
