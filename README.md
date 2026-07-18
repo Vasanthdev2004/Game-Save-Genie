@@ -23,7 +23,7 @@ Game Save Genie runs quietly in the background and gives you what the launchers 
 - 🕹️ **Knows 19,000+ games** — save locations detected via the open-source [Ludusavi](https://github.com/mtkennerly/ludusavi) database, plus process watching to know when you're playing
 - 💾 **Backs up automatically** — when a game closes, and every 10 minutes while it runs
 - 🕰️ **Every session is a version** — immutable, checksummed snapshots; roll back to any point with `gsg restore --version`
-- ☁️ **Your own cloud** — Google Drive (free 15 GB), OneDrive, any S3 bucket, or [anything rclone speaks](https://rclone.org/overview/); retention is enforced so it never fills up
+- ☁️ **Your own cloud** — Google Drive (free 15 GB), OneDrive, any S3 bucket, or [anything rclone speaks](https://rclone.org/overview/); retention is enforced so it never fills up, and **delta uploads** only send the save files that changed (an unchanged 40 MB slot is never re-uploaded)
 - 🖥️ **Follows you between PCs** — `gsg pull` restores on any machine, remapping paths saved under a different Windows username
 - 🔒 **Paranoid by design** — downloads are verified before anything is touched, a safety backup is taken before every restore, restores never run while the game is, and a strictly-newer rule means offline progress is never clobbered
 

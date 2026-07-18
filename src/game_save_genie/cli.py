@@ -24,7 +24,7 @@ from .cloud import (
     list_remote_versions,
     prune_remote_versions,
     run_rclone,
-    upload_save,
+    upload_save_cas,
     write_railway_s3_config,
 )
 from .config import (
@@ -1483,17 +1483,19 @@ def _cloud_upload(
     if not remote_name:
         console.print("[red]No rclone remote configured.[/red]")
         return
-    result = upload_save(
+    if dry_run:
+        console.print(f"[cyan]Would upload {version.id} for {game.title}[/cyan]")
+        return
+    result = upload_save_cas(
         rclone_path,
         game,
         version,
         remote_name,
         config.remote_root,
-        dry_run=dry_run,
         extra_args=config.custom_rclone_args,
     )
     console.print(f"[{'green' if result.success else 'red'}]{result.message}[/]")
-    if result.success and not dry_run:
+    if result.success:
         db = Database(get_data_dir() / "versions.db")
         db.mark_cloud_synced(version.id, result.remote_path)
         pruned = prune_remote_versions(

@@ -21,7 +21,13 @@ def _is_within(base: Path, target: Path) -> bool:
     return True
 
 
-def _validate_member_name(name: str, dest: Path) -> None:
+def validate_member_path(name: str, dest: Path) -> None:
+    """Raise unless ``name`` is a safe relative path that stays within ``dest``.
+
+    Shared by zip/tar extraction and CAS reconstruction so no untrusted
+    member path (absolute, drive-rooted, or containing ``..``) can escape the
+    destination directory.
+    """
     # Check absoluteness under BOTH path flavors: "C:/x" is not absolute on
     # POSIX and "/x" is not absolute on Windows, but a hostile archive can
     # be extracted on either platform.
@@ -32,6 +38,10 @@ def _validate_member_name(name: str, dest: Path) -> None:
         raise RuntimeError(f"Unsafe archive member path: {name}")
     if not _is_within(dest, dest / member):
         raise RuntimeError(f"Archive member escapes destination: {name}")
+
+
+# Backwards-compatible internal alias.
+_validate_member_name = validate_member_path
 
 
 def safe_extract_zip(archive: Path, dest: Path) -> None:

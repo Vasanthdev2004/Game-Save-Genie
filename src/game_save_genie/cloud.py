@@ -2,22 +2,49 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import shutil
 import subprocess
+import tempfile
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
 
+from . import cas
 from .archive import safe_extract_tar_gz, safe_extract_zip, zip_directory
-from .config import get_default_binary_dir
+from .config import get_data_dir, get_default_binary_dir
 from .models import CloudProvider, CloudSyncResult, Game, SaveVersion
 
 logger = logging.getLogger(__name__)
 
 RCLONE_RELEASES_URL = "https://api.github.com/repos/rclone/rclone/releases/latest"
+
+# Content-addressed layout under <remote>/<game_id>/
+CAS_MANIFEST_DIR = "manifests"
+CAS_BLOB_DIR = "blobs"
+
+# Blobs written more recently than this are never GC'd: they may belong to an
+# upload from another machine whose manifest has not landed yet (blobs are
+# uploaded before the manifest). One hour comfortably covers any real upload.
+GC_GRACE_SECONDS = 3600
+# Blob GC is best-effort cleanup; throttle it so heavy play (a backup every
+# few minutes) does not re-list every manifest on every upload.
+GC_MIN_INTERVAL_SECONDS = 1800
+
+
+def entry_kind(raw_entry: str) -> str:
+    """Classify a raw remote listing entry: 'cas', 'zipdir', or 'zip'."""
+    if raw_entry.startswith(CAS_MANIFEST_DIR + "/"):
+        return "cas"
+    if raw_entry.endswith("/"):
+        return "zipdir"
+    return "zip"
 
 
 def get_rclone_config_path() -> Path:
@@ -299,6 +326,266 @@ def upload_save(
     )
 
 
+def _version_source_tree(version: SaveVersion, work_dir: Path) -> Path:
+    """Return a directory holding this version's backup tree.
+
+    Uses the snapshot zip (immutable, hash-matched) when available, extracting
+    it under ``work_dir``; falls back to a directory ``local_path`` for
+    versions whose snapshot zipping failed.
+    """
+    if version.local_path.is_dir():
+        return version.local_path
+    tree = work_dir / "tree"
+    safe_extract_zip(version.local_path, tree)
+    return tree
+
+
+def upload_save_cas(
+    binary: Path,
+    game: Game,
+    version: SaveVersion,
+    remote_name: str,
+    remote_root: str,
+    extra_args: list[str] | None = None,
+) -> CloudSyncResult:
+    """Upload a version as content-addressed blobs plus a manifest.
+
+    Only files whose content is not already in the cloud are transferred
+    (``rclone copy --size-only`` skips blobs already present by hash-name).
+    The manifest is uploaded LAST, so a version becomes visible only once
+    all its blobs are present; an interrupted upload leaves reusable blobs
+    and no dangling version.
+    """
+    manifest_remote = _remote_path(
+        remote_name, remote_root, game.id, CAS_MANIFEST_DIR, f"{version.id}.json"
+    )
+    work = Path(tempfile.mkdtemp(prefix="gsg-cas-"))
+    try:
+        source_tree = _version_source_tree(version, work)
+        manifest = cas.build_manifest(
+            source_tree,
+            version_id=version.id,
+            game_id=game.id,
+            created_at=version.created_at.isoformat(),
+            source_machine=version.source_machine,
+        )
+        stage = work / "blobs"
+        cas.stage_blobs(source_tree, manifest, stage)
+
+        blobs_remote = _remote_path(remote_name, remote_root, game.id, CAS_BLOB_DIR)
+        blob_args = ["copy", str(stage), blobs_remote, "--size-only"]
+        if extra_args:
+            blob_args.extend(extra_args)
+        run_rclone(binary, blob_args)
+
+        manifest_file = work / "manifest.json"
+        manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+        man_args = ["copyto", str(manifest_file), manifest_remote]
+        if extra_args:
+            man_args.extend(extra_args)
+        run_rclone(binary, man_args)
+    except (RuntimeError, OSError) as exc:
+        return CloudSyncResult(
+            success=False, direction="upload",
+            message=f"CAS upload failed: {exc}", remote_path=manifest_remote,
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    return CloudSyncResult(
+        success=True, direction="upload", message="Upload complete",
+        remote_path=manifest_remote,
+    )
+
+
+def download_save_cas(
+    binary: Path,
+    game: Game,
+    version_id: str,
+    local_dir: Path,
+    remote_name: str,
+    remote_root: str,
+    extra_args: list[str] | None = None,
+) -> CloudSyncResult:
+    """Reconstruct a content-addressed version into ``local_dir``, verified."""
+    manifest_remote = _remote_path(
+        remote_name, remote_root, game.id, CAS_MANIFEST_DIR, f"{version_id}.json"
+    )
+    work = Path(tempfile.mkdtemp(prefix="gsg-casdl-"))
+    try:
+        manifest_file = work / "manifest.json"
+        man_args = ["copyto", manifest_remote, str(manifest_file)]
+        if extra_args:
+            man_args.extend(extra_args)
+        result = run_rclone(binary, man_args, check=False)
+        if result.returncode != 0 or not manifest_file.is_file():
+            return CloudSyncResult(
+                success=False, direction="download",
+                message=f"Manifest for {version_id} not found", remote_path="",
+            )
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+
+        blob_dir = work / "blobs"
+        blob_dir.mkdir()
+        keys = sorted(cas.manifest_blob_keys(manifest))
+        if keys:
+            files_from = work / "files.txt"
+            files_from.write_text("\n".join(keys) + "\n", encoding="utf-8")
+            blobs_remote = _remote_path(remote_name, remote_root, game.id, CAS_BLOB_DIR)
+            blob_args = ["copy", blobs_remote, str(blob_dir), "--files-from", str(files_from)]
+            if extra_args:
+                blob_args.extend(extra_args)
+            blob_result = run_rclone(binary, blob_args, check=False)
+            if blob_result.returncode != 0:
+                return CloudSyncResult(
+                    success=False, direction="download",
+                    message=f"Blob download failed (exit {blob_result.returncode})",
+                    remote_path=manifest_remote,
+                )
+
+        local_dir.mkdir(parents=True, exist_ok=True)
+        cas.reconstruct(manifest, blob_dir, local_dir)
+    except (RuntimeError, OSError, json.JSONDecodeError) as exc:
+        return CloudSyncResult(
+            success=False, direction="download",
+            message=f"CAS download failed: {exc}", remote_path=manifest_remote,
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    return CloudSyncResult(
+        success=True, direction="download", message="Download complete",
+        remote_path=manifest_remote,
+    )
+
+
+def _parse_rfc3339(value: str) -> datetime | None:
+    """Parse an rclone ModTime (RFC3339, possibly nanosecond precision)."""
+    s = value.strip()
+    s = re.sub(r"(\.\d{6})\d+", r"\1", s)  # trim over-long fractional seconds
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def gc_blobs(
+    binary: Path,
+    game: Game,
+    remote_name: str,
+    remote_root: str,
+    extra_args: list[str] | None = None,
+    grace_seconds: int = GC_GRACE_SECONDS,
+) -> int:
+    """Delete blobs no longer referenced by any surviving manifest.
+
+    Two guards keep this from ever deleting live save data:
+
+    1. The referenced set is computed from ALL current manifests; if any
+       manifest cannot be downloaded or parsed the GC aborts without deleting
+       anything (a partial reference set could orphan a real version's blob).
+    2. Blobs written within ``grace_seconds`` are never deleted. Uploads write
+       blobs before their manifest, so a freshly uploaded blob is briefly
+       referenced by no manifest; the grace window protects a concurrent
+       upload (e.g. from another machine) whose manifest has not landed yet.
+
+    Returns the number of blobs deleted.
+    """
+    manifests_remote = _remote_path(remote_name, remote_root, game.id, CAS_MANIFEST_DIR)
+    listing = run_rclone(binary, ["lsf", manifests_remote], check=False)
+    if listing.returncode == 3:
+        return 0
+    if listing.returncode != 0:
+        logger.warning("GC: cannot list manifests for %s; skipping", game.id)
+        return 0
+    manifest_names = [
+        line.strip().strip("/")
+        for line in listing.stdout.splitlines()
+        if line.strip().endswith(".json")
+    ]
+
+    work = Path(tempfile.mkdtemp(prefix="gsg-gc-"))
+    try:
+        manifests: list[dict[str, Any]] = []
+        for name in manifest_names:
+            local = work / name
+            args = [
+                "copyto",
+                _remote_path(remote_name, remote_root, game.id, CAS_MANIFEST_DIR, name),
+                str(local),
+            ]
+            if extra_args:
+                args.extend(extra_args)
+            if run_rclone(binary, args, check=False).returncode != 0 or not local.is_file():
+                logger.warning("GC abort: could not read manifest %s for %s", name, game.id)
+                return 0
+            try:
+                manifests.append(json.loads(local.read_text(encoding="utf-8")))
+            except json.JSONDecodeError:
+                logger.warning("GC abort: bad manifest %s for %s", name, game.id)
+                return 0
+
+        referenced = cas.referenced_blob_keys(manifests)
+        blobs_remote = _remote_path(remote_name, remote_root, game.id, CAS_BLOB_DIR)
+        blob_listing = run_rclone(
+            binary, ["lsjson", blobs_remote, "-R", "--files-only"], check=False
+        )
+        if blob_listing.returncode == 3:
+            return 0
+        if blob_listing.returncode != 0:
+            logger.warning("GC: cannot list blobs for %s; skipping", game.id)
+            return 0
+        try:
+            blobs = json.loads(blob_listing.stdout or "[]")
+        except json.JSONDecodeError:
+            logger.warning("GC: unparsable blob listing for %s; skipping", game.id)
+            return 0
+
+        now = datetime.now(timezone.utc)
+        grace = timedelta(seconds=grace_seconds)
+        deleted = 0
+        for obj in blobs:
+            key = str(obj.get("Path", "")).replace("\\", "/")
+            if not key or key in referenced:
+                continue
+            mtime = _parse_rfc3339(str(obj.get("ModTime", "")))
+            # Keep a blob whose age can't be determined, or that is too new.
+            if mtime is None or (now - mtime) < grace:
+                continue
+            target = _remote_path(remote_name, remote_root, game.id, CAS_BLOB_DIR, key)
+            if run_rclone(binary, ["deletefile", target], check=False).returncode == 0:
+                deleted += 1
+        return deleted
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _gc_stamp(game_id: str) -> Path:
+    return get_data_dir() / "cas_gc" / f"{game_id}.stamp"
+
+
+def _gc_due(game_id: str) -> bool:
+    stamp = _gc_stamp(game_id)
+    try:
+        if stamp.exists() and (time.time() - stamp.stat().st_mtime) < GC_MIN_INTERVAL_SECONDS:
+            return False
+    except OSError:
+        pass
+    return True
+
+
+def _mark_gc(game_id: str) -> None:
+    stamp = _gc_stamp(game_id)
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def download_save(
     binary: Path,
     game: Game,
@@ -332,6 +619,15 @@ def download_save(
             direction="download",
             message=f"Could not find version {version_id} in cloud",
             remote_path="",
+        )
+
+    if entry_kind(raw_entry) == "cas":
+        if dry_run:
+            return CloudSyncResult(
+                success=True, direction="download", message="Dry run", remote_path=raw_entry
+            )
+        return download_save_cas(
+            binary, game, version_id, local_dir, remote_name, remote_root, extra_args
         )
 
     local_dir.mkdir(parents=True, exist_ok=True)
@@ -408,6 +704,8 @@ def parse_lsf_entries(stdout: str) -> list[tuple[str, str]]:
         version_id = raw.strip("/")
         if not version_id or version_id.startswith("_"):
             continue
+        if version_id in (CAS_MANIFEST_DIR, CAS_BLOB_DIR):
+            continue  # CAS structure dirs, not versions
         if version_id.endswith(".zip"):
             version_id = version_id[:-4]
         if version_id not in seen:
@@ -433,13 +731,37 @@ def list_remote_version_entries(
     remote_path = _remote_path(remote_name, remote_root, game.id)
     result = run_rclone(binary, ["lsf", remote_path], check=False)
     if result.returncode == 3:
-        return []
-    if result.returncode != 0:
+        legacy: list[tuple[str, str]] = []
+    elif result.returncode != 0:
         raise RuntimeError(
             f"rclone lsf failed (exit {result.returncode}): "
             f"{(result.stderr or result.stdout or '').strip()}"
         )
-    return parse_lsf_entries(result.stdout)
+    else:
+        legacy = parse_lsf_entries(result.stdout)
+
+    # Content-addressed versions live under manifests/<id>.json.
+    manifests_remote = _remote_path(remote_name, remote_root, game.id, CAS_MANIFEST_DIR)
+    man_result = run_rclone(binary, ["lsf", manifests_remote], check=False)
+    cas_entries: list[tuple[str, str]] = []
+    if man_result.returncode == 0:
+        for line in man_result.stdout.splitlines():
+            name = line.strip().strip("/")
+            if name.endswith(".json"):
+                cas_entries.append((name[:-5], f"{CAS_MANIFEST_DIR}/{name}"))
+    elif man_result.returncode != 3:
+        raise RuntimeError(
+            f"rclone lsf manifests failed (exit {man_result.returncode}): "
+            f"{(man_result.stderr or man_result.stdout or '').strip()}"
+        )
+
+    # CAS wins over a same-id legacy zip (shouldn't co-occur, but be safe).
+    merged: dict[str, str] = {}
+    for vid, raw in legacy:
+        merged[vid] = raw
+    for vid, raw in cas_entries:
+        merged[vid] = raw
+    return sorted(merged.items(), key=lambda pair: pair[0])
 
 
 def list_remote_versions(
@@ -485,18 +807,32 @@ def prune_remote_versions(
         logger.warning("Skipping cloud prune for %s: %s", game.id, exc)
         return []
     deleted: list[str] = []
+    removed_cas = False
     for version_id, raw_entry in select_entries_to_prune(entries, keep):
-        if raw_entry.endswith("/"):
-            # Legacy uncompressed upload: a directory tree.
+        kind = entry_kind(raw_entry)
+        if kind == "zipdir":
+            # Legacy uncompressed/nested upload: a directory tree.
             target = _remote_path(remote_name, remote_root, game.id, raw_entry.rstrip("/"))
             result = run_rclone(binary, ["purge", target], check=False)
         else:
+            # Flat zip object, or a CAS manifest file (blobs GC'd below).
             target = _remote_path(remote_name, remote_root, game.id, raw_entry)
             result = run_rclone(binary, ["deletefile", target], check=False)
         if result.returncode == 0:
             deleted.append(version_id)
+            if kind == "cas":
+                removed_cas = True
         else:
             logger.warning("Failed to prune cloud version %s for %s", version_id, game.id)
+
+    # Reclaim blobs orphaned by deleted manifests. Version retention (above)
+    # is exact every time; blob GC is best-effort and throttled, so it may
+    # lag by GC_MIN_INTERVAL_SECONDS — orphaned blobs simply wait one cycle.
+    if removed_cas and _gc_due(game.id):
+        freed = gc_blobs(binary, game, remote_name, remote_root)
+        _mark_gc(game.id)
+        if freed:
+            logger.info("GC freed %d blob(s) for %s", freed, game.id)
     return deleted
 
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-07-18
+
+### Added
+- **Delta cloud uploads (content-addressed storage).** Cloud backups now store each file once by its SHA-256 and describe each version with a small manifest, so a new backup only uploads the save files that actually changed — an unchanged 40 MB slot is never re-sent. Dramatically reduces cloud usage for games with large or many saves. Existing full-zip cloud versions remain fully readable and restorable; retention now also garbage-collects unreferenced blobs (grace-guarded so a concurrent upload's data is never collected).
+
+### Security
+- CAS reconstruction validates every manifest path (rejecting absolute, drive-rooted, and `..` paths) so a tampered manifest from a shared bucket cannot write outside the restore directory.
+
 ## 0.2.0 — 2026-07-18
 
 The trust release: everything the README promises now actually happens.
