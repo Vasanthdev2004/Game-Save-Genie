@@ -4,12 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "game-save-genie"
-version = "0.1.0"
-description = "Self-hosted cloud save sync for games - wraps Ludusavi + rclone"
+version = "0.2.0"
+description = "Self-hosted cloud save sync for the games that don't have it - auto-backup, versioning, and cross-machine restore built on Ludusavi + rclone"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Vasanthdev2004"}]
 requires-python = ">=3.10"
+keywords = ["game-saves", "backup", "cloud-sync", "ludusavi", "rclone", "save-manager", "hydra"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment",
+    "Topic :: System :: Archiving :: Backup",
+]
+
 dependencies = [
     "typer>=0.12.0",
     "pydantic>=2.0",
@@ -32,6 +47,11 @@ dev = [
     "types-PyYAML",
     "types-psutil",
 ]
+
+[project.urls]
+Repository = "https://github.com/Vasanthdev2004/Game-Save-Genie"
+Issues = "https://github.com/Vasanthdev2004/Game-Save-Genie/issues"
+Changelog = "https://github.com/Vasanthdev2004/Game-Save-Genie/blob/main/CHANGELOG.md"
 
 [project.scripts]
 gsg = "game_save_genie.cli:app"

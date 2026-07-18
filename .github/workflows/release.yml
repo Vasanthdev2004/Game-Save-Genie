@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install . pyinstaller
+      - name: Build gsg.exe
+        run: >
+          pyinstaller --onefile --console --clean --name gsg
+          --distpath dist --workpath build --specpath build
+          packaging/gsg_entry.py
+      - name: Smoke test
+        run: dist\gsg.exe --version
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/gsg.exe
+          generate_release_notes: true

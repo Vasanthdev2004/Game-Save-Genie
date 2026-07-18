@@ -1,0 +1,36 @@
+name: Bug report
+description: Something broke or behaved unexpectedly
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Command output
+      description: Paste the full output of the failing command (run with `gsg -v ...` for verbose logs). The log file at `%LOCALAPPDATA%\game-save-genie\Game Save Genie\logs\` helps too.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: gsg version
+      description: Output of `gsg --version`
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11 23H2
+    validations:
+      required: true
+  - type: input
+    id: cloud
+    attributes:
+      label: Cloud provider
+      placeholder: Google Drive / Railway S3 / OneDrive / other rclone remote

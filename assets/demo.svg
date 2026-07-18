@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" font-family="ui-monospace, 'Cascadia Code', Consolas, monospace" font-size="13">
+  <style>
+    .line { opacity: 0; animation: reveal 16s linear infinite; }
+    @keyframes reveal { 0% {opacity:0} 3% {opacity:1} 96% {opacity:1} 100% {opacity:0} }
+    .l1  { animation-delay: 0.2s; }
+    .l2  { animation-delay: 0.9s; }
+    .l3  { animation-delay: 2.0s; }
+    .l4  { animation-delay: 2.3s; }
+    .l5  { animation-delay: 2.5s; }
+    .l6  { animation-delay: 2.7s; }
+    .l7  { animation-delay: 3.4s; }
+    .l8  { animation-delay: 4.4s; }
+    .l9  { animation-delay: 5.6s; }
+    .l10 { animation-delay: 6.4s; }
+    .l11 { animation-delay: 6.7s; }
+    .l12 { animation-delay: 8.2s; }
+    .l13 { animation-delay: 10.2s; }
+    .l14 { animation-delay: 11.2s; }
+    .l15 { animation-delay: 12.0s; }
+    .green { fill: #3fb950; } .cyan { fill: #56d4dd; } .dim { fill: #8b949e; }
+    .fg { fill: #e6edf3; } .prompt { fill: #ff7b72; }
+  </style>
+  <rect width="720" height="400" rx="10" fill="#0d1117" stroke="#30363d"/>
+  <circle cx="24" cy="22" r="6" fill="#ff5f57"/>
+  <circle cx="44" cy="22" r="6" fill="#febc2e"/>
+  <circle cx="64" cy="22" r="6" fill="#28c840"/>
+  <text x="360" y="26" text-anchor="middle" class="dim">gsg auto</text>
+  <g transform="translate(28, 60)">
+    <text class="line l1"><tspan class="prompt">$</tspan> <tspan class="fg">gsg auto</tspan></text>
+    <text y="22" class="line l2 cyan">Scanning for Hydra/manual games...</text>
+    <text y="44" class="line l3 green">Auto-added 3 game(s):</text>
+    <text y="66" class="line l4 fg">  - Elden Ring</text>
+    <text y="88" class="line l5 fg">  - Cyberpunk 2077</text>
+    <text y="110" class="line l6 fg">  - Hades II</text>
+    <text y="132" class="line l7 cyan">Checking cloud for newer saves...</text>
+    <text y="154" class="line l8 cyan">cyberpunk-2077: cloud has a newer save. Downloading...</text>
+    <text y="176" class="line l9 green">Restored Cyberpunk 2077 from cloud version 20260718-091402</text>
+    <text y="198" class="line l10 green">Auto-backup active. Watching 3 game(s).</text>
+    <text y="220" class="line l11 dim">Periodic backup every 600s during gameplay. Press Ctrl+C to stop.</text>
+    <text y="252" class="line l12 green">Game started: Elden Ring</text>
+    <text y="274" class="line l13 cyan">Game closed: Elden Ring. Backing up to cloud...</text>
+    <text y="296" class="line l14 green">Backed up 14 files (18.42 MiB)</text>
+    <text y="318" class="line l15 green">Upload complete ✓</text>
+  </g>
+</svg>

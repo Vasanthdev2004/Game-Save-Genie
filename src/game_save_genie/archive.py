@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import tarfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 def _is_within(base: Path, target: Path) -> bool:
@@ -22,6 +22,11 @@ def _is_within(base: Path, target: Path) -> bool:
 
 
 def _validate_member_name(name: str, dest: Path) -> None:
+    # Check absoluteness under BOTH path flavors: "C:/x" is not absolute on
+    # POSIX and "/x" is not absolute on Windows, but a hostile archive can
+    # be extracted on either platform.
+    if PureWindowsPath(name).is_absolute() or PurePosixPath(name).is_absolute():
+        raise RuntimeError(f"Unsafe archive member path: {name}")
     member = Path(name)
     if member.is_absolute() or ".." in member.parts:
         raise RuntimeError(f"Unsafe archive member path: {name}")

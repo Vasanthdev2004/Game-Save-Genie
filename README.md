@@ -1,131 +1,146 @@
-# Game Save Genie
+<div align="center">
 
-Self-hosted cloud save sync for PC games that don't have their own — Hydra and other manual installs, GOG offline installers, emulator-adjacent titles. Wraps the open-source [Ludusavi](https://github.com/mtkennerly/ludusavi) save-detection engine (19,000+ games) and [rclone](https://rclone.org/) cloud transport. No subscription, no storage caps you don't control, your saves live in your own bucket.
+# 🧞 Game Save Genie
 
-## What it does
+**Steam Cloud for the games that don't have it.**
 
-- **Fully automatic mode** (`gsg auto`): scans your machine, auto-tracks every non-launcher game, then watches processes in the background — backing up when a game closes and every 10 minutes while it runs. Newer cloud saves are pulled down automatically at startup and whenever the game isn't running, so a machine that's behind catches up before you play (never underneath a live game).
-- **Real save versioning**: every backup is frozen into an immutable per-version zip with a SHA-256 checksum — roll back to any play session with `gsg restore --version`.
-- **Cloud retention**: `max_versions` is enforced both locally and in the cloud, so your bucket doesn't grow forever.
-- **Safety-first restores**: every restore (manual or automatic) verifies the snapshot's integrity first, then takes a safety backup of your current saves before touching anything. A failed download or restore changes nothing and retries cleanly.
-- **Cross-machine sync** (`gsg pull`): set up the same cloud on a second PC and pull your saves down — paths recorded under a different Windows username are remapped to the new machine automatically.
-- **Launcher filtering**: Steam/Epic/Xbox games are detected and skipped by default — those launchers already sync saves.
-- **Run at boot**: `gsg auto --install` starts the watcher automatically on Windows startup.
+Automatic, versioned, self-hosted cloud save sync for PC games — Hydra and manual installs, GOG offline installers, repacks, anything a launcher isn't protecting. Your saves, your cloud, no subscription.
 
-Steam/Epic/Xbox already cloud-sync their own games. Game Save Genie exists for everything else.
+[![CI](https://github.com/Vasanthdev2004/Game-Save-Genie/actions/workflows/ci.yml/badge.svg)](https://github.com/Vasanthdev2004/Game-Save-Genie/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
-## Install
+<img src="assets/demo.svg" alt="gsg auto: scans your games, restores newer cloud saves, backs up on game close" width="720">
 
-**Standalone (no Python needed):** download `gsg.exe` from Releases, or build it yourself:
+</div>
 
-```powershell
-powershell -File packaging\build_exe.ps1   # produces dist\gsg.exe
-```
+## Why this exists
 
-**From source** (requires Python 3.10+):
+If you play games outside Steam/Epic/Xbox, **nothing is protecting your saves**. One corrupted file, one Windows reinstall, one "wait, which PC did I play on last?" and dozens of hours are gone. Paid save-sync services cap your history at a couple of backups and delete everything when you stop paying.
 
-```bash
-git clone https://github.com/Vasanthdev2004/game-save-genie
-cd game-save-genie
-pip install -e .
-```
+Game Save Genie runs quietly in the background and gives you what the launchers give their games:
 
-Ludusavi and rclone are downloaded automatically on first use (or point at your own binaries with `gsg config --ludusavi / --rclone`).
+- 🕹️ **Knows 19,000+ games** — save locations detected via the open-source [Ludusavi](https://github.com/mtkennerly/ludusavi) database, plus process watching to know when you're playing
+- 💾 **Backs up automatically** — when a game closes, and every 10 minutes while it runs
+- 🕰️ **Every session is a version** — immutable, checksummed snapshots; roll back to any point with `gsg restore --version`
+- ☁️ **Your own cloud** — Google Drive (free 15 GB), OneDrive, any S3 bucket, or [anything rclone speaks](https://rclone.org/overview/); retention is enforced so it never fills up
+- 🖥️ **Follows you between PCs** — `gsg pull` restores on any machine, remapping paths saved under a different Windows username
+- 🔒 **Paranoid by design** — downloads are verified before anything is touched, a safety backup is taken before every restore, restores never run while the game is, and a strictly-newer rule means offline progress is never clobbered
 
-## Quick start
+Steam/Epic/Xbox games are detected and skipped automatically — those launchers already sync their own saves.
+
+## Get started in 30 seconds
+
+**Standalone (no Python):** grab `gsg.exe` from [Releases](https://github.com/Vasanthdev2004/Game-Save-Genie/releases).
+**From source** (Python 3.10+): `pip install git+https://github.com/Vasanthdev2004/Game-Save-Genie`
+
+Then:
 
 ```bash
 gsg
 ```
 
-That's the whole setup: on first run, `gsg` (or `gsg auto`) launches a guided wizard — pick **Google Drive** or **OneDrive** (a browser window opens, sign in, click Allow — no keys to copy), or Railway S3 if you prefer your own bucket, then optionally enable start-at-boot. After that:
+That's the whole setup. A wizard finds your games, connects your cloud (Google Drive/OneDrive open a browser — sign in, click Allow, done), and offers start-at-boot. From then on `gsg auto` protects everything, hands-free. Ludusavi and rclone are downloaded automatically on first use.
+
+## How it compares
+
+|  | Game Save Genie | Ludusavi | Game Backup Monitor | Hydra Cloud | Syncthing DIY |
+|---|:-:|:-:|:-:|:-:|:-:|
+| Auto-backup on game close | ✅ | ❌ | ✅ | ✅ | ➖ folder sync only |
+| Periodic backup during play | ✅ | ❌ | ✅ | ❌ | ➖ |
+| Automatic cloud restore | ✅ | ❌ manual | ❌ | ❌ | ➖ no game awareness |
+| Cross-machine path remapping | ✅ | ❌ | ❌ | ✅ | ❌ |
+| Version history | ✅ per session | ✅ | ✅ | ⚠️ 2 per game | ❌ conflict files |
+| Storage you own | ✅ | ✅ | ⚠️ sync folder | ❌ their servers | ✅ |
+| Free | ✅ | ✅ | ✅ | ❌ subscription* | ✅ |
+
+<sub>*Hydra Cloud saves are deleted 7 days after a subscription ends. Comparison reflects mid-2026; check each project for current features. Ludusavi is a fantastic backup engine — Game Save Genie builds on it and adds the automation layer.</sub>
+
+## Everyday commands
 
 ```bash
-gsg auto            # scan, auto-track non-launcher games, start watching
-gsg auto --install  # start hidden at logon (per-user Startup entry, no admin needed)
+gsg auto                  # the only command most people need — watch + backup + restore
+gsg auto --install        # start hidden at logon (per-user, no admin needed)
+
+gsg status                # per-game overview, storage meter, quota warning
+gsg scan                  # what's installed (--source all to include Steam/Epic/Xbox)
+gsg add "Elden Ring" --exe eldenring.exe    # track something manually
+
+gsg backup [game-id]      # back up now (--dry-run previews, changes nothing)
+gsg versions <game-id>    # local history      gsg cloud-list <game-id>  # cloud history
+gsg restore <game-id> [--version ID]         # roll back to any local snapshot
+gsg pull <game-id> [--version ID]            # restore from the cloud (any machine)
+gsg pull --all            # catch this machine up on everything that's behind
+
+gsg pause / resume <game-id>   # exclude/re-include a game
+gsg remove <game-id> [--purge] # untrack (--purge deletes local + cloud saves)
 ```
-
-That's it. Play games; saves are backed up on close and every 10 minutes during play. On a machine that's behind, newer cloud saves are applied at watcher startup and during idle checks — if you launch a game while a newer cloud save exists, you get a notification instead of a mid-session overwrite.
-
-## Manual commands
-
-```bash
-gsg scan                    # See detected games (default: non-launcher only; --source all)
-gsg add "Elden Ring" --exe eldenring.exe   # Track a game manually
-gsg list                    # Tracked games
-gsg backup [game-id]        # Back up one or all games (--dry-run previews, changes nothing)
-gsg versions <game-id>      # List local versions
-gsg cloud-list <game-id>    # List cloud versions
-gsg restore <game-id> [--version ID]       # Restore latest or a specific local version
-gsg pull <game-id> [--version ID]          # Restore from the CLOUD (cross-machine)
-gsg pull --all              # Catch this machine up on every game that is behind
-gsg status                  # Per-game overview + storage usage and quota warning
-gsg usage                   # Local + remote storage totals
-gsg pause / resume <game-id>  # Exclude/re-include a game from auto-backup
-gsg remove <game-id> [--purge]  # Untrack (--purge also deletes local + cloud saves)
-gsg watch                   # Simple watcher: backup-on-close only, no auto-restore
-```
-
-## Cloud providers
-
-```bash
-gsg setup-drive       # Google Drive via browser sign-in (free 15 GB)
-gsg setup-onedrive    # OneDrive via browser sign-in (free 5 GB)
-gsg setup-railway     # Railway S3: endpoint + access/secret keys + bucket
-gsg setup-rclone x    # anything else rclone supports, configured interactively
-```
-
-The remote layout is `<remote>:<remote_root>/<game-id>/<version-id>.zip` — one compressed object per version.
 
 ## Playing on two machines
 
-Run the same setup (`gsg`, same cloud account) on both PCs. `gsg auto` keeps each machine backed up and pulls newer cloud saves at startup and while a game isn't running; `gsg pull --all` catches a machine up on demand, and `gsg pull <game> --version <id>` fetches any specific session. Backups record which machine made them (`gsg versions`), restores only ever apply a strictly-newer cloud save unless you `--force`, a safety backup is taken before every restore, and saves made under a different Windows username are path-remapped to the machine doing the restoring.
+Run the same setup (same cloud account) on both PCs. Each machine backs itself up; newer cloud saves are pulled down at startup and while a game isn't running. `gsg pull --all` catches a machine up on demand.
+
+The trust rules that make this safe:
+
+1. **Verify first** — downloads are integrity-checked and staged before anything on disk changes; a bad download changes nothing.
+2. **Safety backup always** — your current saves are snapshotted before every restore, and the restore aborts if that fails.
+3. **Strictly newer only** — a restore only happens when the cloud is ahead of everything this machine has seen. Played offline? Your progress wins and uploads on next close.
+4. **Never under a live game** — if you're playing, you get a notification instead of a mid-session overwrite.
+5. **Usernames remapped** — saves recorded under `C:\Users\alice\...` restore correctly for `bob`, both in Ludusavi's manifest and the backed-up file tree.
 
 ## Configuration
 
-Config lives at `%APPDATA%\game-save-genie\Game Save Genie\config.yaml` on Windows (`~/.config/Game Save Genie/` on Linux). View or edit with `gsg config`:
+`gsg config` shows everything; config lives at `%APPDATA%\game-save-genie\Game Save Genie\config.yaml` (Windows) or `~/.config/Game Save Genie/` (Linux).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `backup_dir` | `<data>/backups` | Local backup root |
 | `max_versions` | `10` | Versions kept per game, locally **and** in the cloud |
-| `cloud_provider` | – | Default provider (`s3`, `google_drive`, …) |
-| `rclone_remote_name` | – | Name of the rclone remote to upload through |
-| `remote_root` | `game-save-genie` | Root folder / bucket name on the remote |
-| `storage_limit_gb` | `5.0` | Warn in `gsg status` at 80% of this (0 = off) |
-| `ludusavi_path` / `rclone_path` | auto-download | Custom binary paths |
+| `rclone_remote_name` | – | rclone remote to upload through (set by the wizard) |
+| `remote_root` | `game-save-genie` | Folder/bucket on the remote |
+| `storage_limit_gb` | `5.0` | Warn in `gsg status` at 80% (0 = off) |
+| `backup_dir` | `<data>/backups` | Local backup root |
+| `ludusavi_path` / `rclone_path` | auto-download | Bring your own binaries |
 
-## How versioning works
+Cloud layout: `<remote>:<remote_root>/<game-id>/<version-id>.zip` — one compressed, checksummed object per play session.
 
-Each backup runs Ludusavi into a per-game working directory, then freezes that directory into `backups/_versions/<game-id>/<version-id>.zip` with a SHA-256 checksum recorded in a local SQLite database. Restores extract the chosen snapshot to a staging directory, verify it, take a safety backup of your current saves (aborting if that fails), and only then apply. Automatic cloud restore only fires when the cloud is *strictly newer* than anything this machine has seen, and only while the game is not running — offline progress is never clobbered, safety backups live in their own retention pool so they never evict real backups, and a failed download or restore changes nothing and retries at the next idle check.
+## FAQ
+
+**Is this safe for my saves?** That's the whole design brief. Every restore is preceded by a verified download *and* a safety backup of your current state; any failure aborts cleanly rather than half-applying. The restore pipeline was built failure-first — see [CHANGELOG](CHANGELOG.md).
+
+**Where do my saves live?** In your own cloud storage, as plain zip files you can open with anything. No accounts, no servers of ours, no telemetry — `gsg` only ever talks to your configured remote and GitHub (to download the Ludusavi/rclone binaries).
+
+**What if I stop using it?** Your saves are still sitting in your Drive/bucket as ordinary zips, and Ludusavi can restore its own backup format directly. No lock-in, nothing expires.
+
+**Linux / Steam Deck?** Backup, restore, and `pull` have Linux code paths (including Wine-prefix handling) but need real-world testing; the watcher and autostart are Windows-only today. If you run Linux, [issues](https://github.com/Vasanthdev2004/Game-Save-Genie/issues) with reports are gold — see [CONTRIBUTING](CONTRIBUTING.md).
+
+**Emulator saves? Games Ludusavi doesn't know?** Planned: `gsg add --path` for arbitrary directories with a RetroArch preset. Watch the repo.
 
 ## Project structure
 
 ```
 src/game_save_genie/
   cli.py            # Typer CLI — all commands and orchestration
-  config.py         # Config + tracked-games persistence (platformdirs + YAML)
-  models.py         # Pydantic models
+  ludusavi.py       # Ludusavi wrapper (scan/backup/restore)
+  cloud.py          # rclone wrapper: upload/download/list/prune
+  watcher.py        # process watcher (start/close/periodic/idle callbacks)
+  sync.py           # pure restore-decision policy (unit-tested)
+  remap.py          # cross-machine path remapping
+  archive.py        # safe extraction, snapshot zipping, hashing
   database.py       # SQLite version + sync-state tracking
-  ludusavi.py       # Ludusavi binary wrapper (scan/backup/restore)
-  cloud.py          # rclone wrapper: upload/download/list/prune, Railway S3 setup
-  archive.py        # Safe zip/tar extraction, snapshot zipping, hashing
-  sync.py           # Pure restore-decision policy (unit-tested)
-  watcher.py        # psutil process watcher (start/close/periodic callbacks)
-  launcher.py       # Steam/Epic/Xbox detection for scan filtering
-  notify.py         # Rotating file log + Windows toast notifications
-  remap.py          # Cross-machine path remapping applied by pull/auto-restore
+  config.py         # config + tracked-games persistence
+  launcher.py       # Steam/Epic/Xbox detection
+  notify.py         # file logging + Windows toasts
+  models.py         # Pydantic models
 ```
 
-## Development
-
-```bash
-pip install -e ".[dev]"
-pytest            # tests
-ruff check src tests
-mypy src tests    # strict mode
-```
+Development: `pip install -e ".[dev]"`, then `pytest`, `ruff check src tests`, `mypy src tests` (strict). CI runs all three on Windows and Linux.
 
 ## License
 
-MIT
+[MIT](LICENSE). Built on the shoulders of [Ludusavi](https://github.com/mtkennerly/ludusavi) and [rclone](https://rclone.org/) — go star them too.
+
+---
+
+<div align="center">
+<sub>If Game Save Genie saved your save, a ⭐ helps other players find it.</sub>
+</div>
