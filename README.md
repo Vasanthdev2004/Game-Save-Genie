@@ -15,7 +15,13 @@ Steam/Epic/Xbox already cloud-sync their own games. Game Save Genie exists for e
 
 ## Install
 
-Requires Python 3.10+.
+**Standalone (no Python needed):** download `gsg.exe` from Releases, or build it yourself:
+
+```powershell
+powershell -File packaging\build_exe.ps1   # produces dist\gsg.exe
+```
+
+**From source** (requires Python 3.10+):
 
 ```bash
 git clone https://github.com/Vasanthdev2004/game-save-genie
@@ -25,20 +31,17 @@ pip install -e .
 
 Ludusavi and rclone are downloaded automatically on first use (or point at your own binaries with `gsg config --ludusavi / --rclone`).
 
-## Quick start (automatic mode)
+## Quick start
 
 ```bash
-# 1. One-time cloud setup (Railway S3 — Hobby plan includes 5 GB)
-#    Create a bucket in the Railway dashboard, then:
-gsg setup-railway
-# prompts for endpoint, access key, secret key, bucket name
+gsg
+```
 
-# 2. Start fully automatic backup
-gsg auto
-# scans for non-launcher games, auto-tracks them, and starts watching
+That's the whole setup: on first run, `gsg` (or `gsg auto`) launches a guided wizard — pick **Google Drive** or **OneDrive** (a browser window opens, sign in, click Allow — no keys to copy), or Railway S3 if you prefer your own bucket, then optionally enable start-at-boot. After that:
 
-# 3. (Optional) start on boot
-gsg auto --install
+```bash
+gsg auto            # scan, auto-track non-launcher games, start watching
+gsg auto --install  # start hidden at logon (per-user Startup entry, no admin needed)
 ```
 
 That's it. Play games; saves are backed up on close and every 10 minutes during play. On a machine that's behind, newer cloud saves are applied at watcher startup and during idle checks — if you launch a game while a newer cloud save exists, you get a notification instead of a mid-session overwrite.
@@ -62,11 +65,11 @@ gsg watch                   # Simple watcher: backup-on-close only, no auto-rest
 
 ## Cloud providers
 
-**Railway S3** is the guided path (`gsg setup-railway`). Any rclone-supported provider works:
-
 ```bash
-gsg setup-rclone mydrive        # interactive rclone config
-gsg config --rclone-remote mydrive --cloud-provider google_drive
+gsg setup-drive       # Google Drive via browser sign-in (free 15 GB)
+gsg setup-onedrive    # OneDrive via browser sign-in (free 5 GB)
+gsg setup-railway     # Railway S3: endpoint + access/secret keys + bucket
+gsg setup-rclone x    # anything else rclone supports, configured interactively
 ```
 
 The remote layout is `<remote>:<remote_root>/<game-id>/<version-id>.zip` — one compressed object per version.

@@ -1,8 +1,53 @@
-"""Tests for CLI helper functions."""
+"""Tests for CLI helper functions and onboarding entry points."""
 
 from __future__ import annotations
 
-from game_save_genie.cli import _slugify
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from game_save_genie.cli import _slugify, app
+
+runner = CliRunner()
+
+
+def test_bare_gsg_shows_help_when_not_a_tty(tmp_path: Path) -> None:
+    """Non-interactive bare invocation must print help, never hang on a wizard."""
+    result = runner.invoke(app, ["--config", str(tmp_path / "config.yaml")])
+    assert result.exit_code == 0
+    assert "Commands" in result.output
+
+
+def test_auto_unconfigured_non_tty_exits_with_hint(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import pytest
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    # Keep the error path from touching the real user profile / root logger.
+    monkeypatch.setattr("game_save_genie.cli.setup_file_logging", lambda p: p)
+    result = runner.invoke(app, ["--config", str(tmp_path / "config.yaml"), "auto"])
+    assert result.exit_code == 1
+    assert "guided setup" in result.output
+
+
+def test_auto_no_wizard_never_prompts(tmp_path: Path, monkeypatch: object) -> None:
+    """The autostart entry passes --no-wizard: unconfigured must exit, not prompt."""
+    import pytest
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    monkeypatch.setattr("game_save_genie.cli.setup_file_logging", lambda p: p)
+    result = runner.invoke(
+        app, ["--config", str(tmp_path / "config.yaml"), "auto", "--no-wizard"]
+    )
+    assert result.exit_code == 1
+    assert "not configured" in result.output
+
+
+def test_version_flag(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert "Game Save Genie" in result.output
 
 
 def test_slugify_matches_legacy_scheme() -> None:

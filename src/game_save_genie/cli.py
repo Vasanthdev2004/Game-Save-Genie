@@ -75,7 +75,7 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
     config: Optional[Path] = typer.Option(None, "--config", help="Path to config file"),
@@ -89,6 +89,22 @@ def main(
     _configure_logging(verbose)
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config
+
+    if ctx.invoked_subcommand is None:
+        # Bare `gsg`: first run gets the guided setup; otherwise show help.
+        if not _cloud_configured(config) and sys.stdin.isatty():
+            if _run_setup_wizard(ctx):
+                console.print(
+                    "\n[green]Setup complete![/green] Run [bold]gsg auto[/bold] to start "
+                    "automatic backup."
+                )
+                return
+        console.print(ctx.get_help())
+
+
+def _cloud_configured(config_path: Optional[Path]) -> bool:
+    config = load_config(config_path)
+    return bool(config.rclone_remote_name and config.cloud_provider)
 
 
 @app.command()
@@ -548,8 +564,12 @@ def auto(
     uninstall: bool = typer.Option(False, "--uninstall", help="Remove from Windows startup"),
     interval: float = typer.Option(5.0, "--interval", help="Polling interval in seconds"),
     periodic: float = typer.Option(600.0, "--periodic", help="Periodic backup interval in seconds during gameplay (0=off)"),
+    no_wizard: bool = typer.Option(
+        False, "--no-wizard",
+        help="Exit with an error instead of launching setup when unconfigured (used by autostart)",
+    ),
 ) -> None:
-    """Fully automatic cloud backup. Scans for Hydra/manual games, watches them, and backs up to Railway S3 on close.
+    """Fully automatic cloud backup: scans for Hydra/manual games, watches them, and backs up to your configured cloud storage.
 
     Run with --install to make it start automatically on Windows boot.
     """
@@ -559,16 +579,37 @@ def auto(
 
     config_path = ctx.obj.get("config_path")
     config = load_config(config_path)
-    setup_file_logging(get_data_dir() / "logs")
 
-    # Verify Railway S3 is configured
+    # First run: walk through cloud setup instead of erroring out. The
+    # autostart entry passes --no-wizard because its console is hidden —
+    # isatty() is still True there, and a wizard prompt would block forever
+    # on a console nobody can see.
     if not config.rclone_remote_name or not config.cloud_provider:
-        console.print("[red]Cloud storage not configured. Run 'gsg setup-railway' first.[/red]")
-        raise typer.Exit(1)
+        message = (
+            "Cloud storage not configured. Run 'gsg' for guided setup, "
+            "or 'gsg setup-drive' / 'gsg setup-railway'."
+        )
+        if no_wizard or not sys.stdin.isatty():
+            try:
+                setup_file_logging(get_data_dir() / "logs")
+            except OSError:
+                pass
+            logging.getLogger(__name__).error(message)
+            console.print(f"[red]{message}[/red]")
+            raise typer.Exit(1)
+        if not _run_setup_wizard(ctx):
+            console.print(
+                "[yellow]Cloud storage is required for gsg auto. "
+                "Run 'gsg' again to set it up.[/yellow]"
+            )
+            raise typer.Exit(1)
+        config = load_config(config_path)
 
     if install:
-        _install_startup()
+        _install_startup(config_path)
         return
+
+    setup_file_logging(get_data_dir() / "logs")
 
     # Scan for non-launcher (Hydra/manual) games
     from .launcher import detect_launcher, get_all_launcher_games
@@ -600,7 +641,7 @@ def auto(
             id=game_id,
             title=title,
             platform=_current_platform(),
-            cloud_provider=CloudProvider.S3,
+            cloud_provider=config.cloud_provider or CloudProvider.S3,
             auto_sync=True,
         )
         new_games.append(game)
@@ -701,37 +742,96 @@ def auto(
         lock.close()
 
 
-def _install_startup() -> None:
-    """Install gsg auto as a Windows startup (hidden VBS wrapper)."""
-    startup_dir = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-    startup_dir.mkdir(parents=True, exist_ok=True)
+def _startup_vbs_path() -> Path:
+    startup_dir = (
+        Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows"
+        / "Start Menu" / "Programs" / "Startup"
+    )
+    return startup_dir / "GameSaveGenie.vbs"
 
-    vbs_path = startup_dir / "GameSaveGenie.vbs"
-    # Find the gsg executable
-    import sys
-    gsg_path = Path(sys.executable).parent / "gsg.exe"
-    if not gsg_path.exists():
-        # Try to find it in the venv
-        project_venv = Path(__file__).resolve().parents[2] / ".venv" / "Scripts" / "gsg.exe"
-        gsg_path = project_venv if project_venv.exists() else gsg_path
 
-    vbs_content = f'''Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run """{gsg_path}"" auto", 0, False
-'''
+def _find_gsg_exe() -> Optional[Path]:
+    """Locate the gsg executable for autostart, or None."""
+    if getattr(sys, "frozen", False):
+        # Running as a PyInstaller bundle: this process IS gsg.exe.
+        return Path(sys.executable)
+    candidate = Path(sys.executable).parent / "gsg.exe"
+    if candidate.exists():
+        return candidate
+    import shutil
+
+    which = shutil.which("gsg")
+    if which:
+        return Path(which)
+    project_venv = Path(__file__).resolve().parents[2] / ".venv" / "Scripts" / "gsg.exe"
+    if project_venv.exists():
+        return project_venv
+    return None
+
+
+def _install_startup(config_path: Optional[Path] = None) -> None:
+    """Install gsg auto to run hidden at logon via the user's Startup folder.
+
+    A Startup-folder script needs no elevation and no console window.
+    (A Task Scheduler ONLOGON task was considered and rejected: schtasks
+    requires elevation and pins a visible console window to every logon.)
+    The script passes --no-wizard so an unconfigured boot run exits with a
+    logged error instead of blocking forever on an invisible prompt, and it
+    checks the executable still exists so a moved exe fails silently rather
+    than popping an error dialog at every logon.
+    """
+    if os.name != "nt":
+        console.print("[yellow]Autostart install is currently Windows-only.[/yellow]")
+        raise typer.Exit(1)
+
+    gsg_path = _find_gsg_exe()
+    if gsg_path is None:
+        console.print(
+            "[red]Could not locate the gsg executable; autostart not installed. "
+            "Install the package (pip install .) or use the standalone gsg.exe.[/red]"
+        )
+        raise typer.Exit(1)
+
+    temp_dir = os.environ.get("TEMP", "")
+    if temp_dir and str(gsg_path).lower().startswith(temp_dir.lower()):
+        console.print(
+            "[yellow]gsg.exe is running from a temporary folder. Move it somewhere "
+            "permanent and re-run 'gsg auto --install', or autostart will stop "
+            "working when the folder is cleaned up.[/yellow]"
+        )
+
+    # Inside a VBS double-quoted string a literal quote is doubled ("").
+    command = f'""{gsg_path}""'
+    if config_path is not None:
+        command += f' --config ""{config_path}""'
+    command += " auto --no-wizard"
+
+    vbs_path = _startup_vbs_path()
+    vbs_path.parent.mkdir(parents=True, exist_ok=True)
+    vbs_content = (
+        "On Error Resume Next\n"
+        'Set fso = CreateObject("Scripting.FileSystemObject")\n'
+        f'If fso.FileExists("{gsg_path}") Then\n'
+        '    Set WshShell = CreateObject("WScript.Shell")\n'
+        f'    WshShell.Run "{command}", 0, False\n'
+        "End If\n"
+    )
     vbs_path.write_text(vbs_content, encoding="utf-8")
     console.print(f"[green]Installed to Windows startup: {vbs_path}[/green]")
-    console.print("[dim]Game Save Genie will auto-start on boot and back up saves in the background.[/dim]")
+    console.print(
+        f"[dim]Runs '{gsg_path}' hidden at logon. Moving the executable breaks "
+        f"autostart — re-run 'gsg auto --install' after moving it.[/dim]"
+    )
 
 
 def _uninstall_startup() -> None:
     """Remove gsg auto from Windows startup."""
-    startup_dir = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-    vbs_path = startup_dir / "GameSaveGenie.vbs"
+    vbs_path = _startup_vbs_path()
     if vbs_path.exists():
         vbs_path.unlink()
         console.print(f"[green]Removed from Windows startup: {vbs_path}[/green]")
     else:
-        console.print("[yellow]Not found in startup.[/yellow]")
+        console.print("[yellow]No autostart entry found.[/yellow]")
 
 
 @app.command(name="config")
@@ -848,15 +948,202 @@ def setup_railway(
 ) -> None:
     """Configure rclone for Railway S3-compatible storage."""
     config_path = ctx.obj.get("config_path") or get_config_path()
+    conf = _configure_railway(
+        config_path, remote_name, endpoint, access_key, secret_key, bucket, region
+    )
+    if not _verify_railway_or_revert(config_path, remote_name, bucket):
+        raise typer.Exit(1)
+    console.print(f"rclone config written to: {conf}")
+    console.print("Test it with: gsg backup <game-id>")
+
+
+def _configure_railway(
+    config_path: Path,
+    remote_name: str,
+    endpoint: str,
+    access_key: str,
+    secret_key: str,
+    bucket: str,
+    region: str,
+) -> Path:
     config = load_config(config_path)
-    config_path_obj = write_railway_s3_config(remote_name, endpoint, access_key, secret_key, bucket, region)
+    conf_path = write_railway_s3_config(
+        remote_name, endpoint, access_key, secret_key, bucket, region
+    )
     config.cloud_provider = CloudProvider.S3
     config.rclone_remote_name = remote_name
     config.remote_root = bucket
     save_config(config, config_path)
-    console.print(f"[green]Railway S3 remote '{remote_name}' configured.[/green]")
-    console.print(f"rclone config written to: {config_path_obj}")
-    console.print("Test it with: gsg backup <game-id>")
+    return conf_path
+
+
+@app.command(name="setup-drive")
+def setup_drive(
+    ctx: typer.Context,
+    remote_name: str = typer.Argument(default="gdrive", help="Name for the rclone remote"),
+) -> None:
+    """Set up Google Drive via browser sign-in (no keys to copy)."""
+    config_path = ctx.obj.get("config_path") or get_config_path()
+    if not _setup_oauth_remote(
+        config_path, remote_name, "drive", CloudProvider.GOOGLE_DRIVE, "Google Drive"
+    ):
+        raise typer.Exit(1)
+
+
+@app.command(name="setup-onedrive")
+def setup_onedrive(
+    ctx: typer.Context,
+    remote_name: str = typer.Argument(default="onedrive", help="Name for the rclone remote"),
+) -> None:
+    """Set up OneDrive via browser sign-in (no keys to copy)."""
+    config_path = ctx.obj.get("config_path") or get_config_path()
+    if not _setup_oauth_remote(
+        config_path, remote_name, "onedrive", CloudProvider.ONEDRIVE, "OneDrive"
+    ):
+        raise typer.Exit(1)
+
+
+def _list_rclone_remotes(rclone_path: Path) -> list[str]:
+    """Names of configured rclone remotes (exact, without trailing colon)."""
+    result = run_rclone(rclone_path, ["listremotes"], check=False)
+    if result.returncode != 0:
+        return []
+    return [
+        line.strip().rstrip(":")
+        for line in (result.stdout or "").splitlines()
+        if line.strip()
+    ]
+
+
+def _save_cloud_choice(config_path: Path, provider: CloudProvider, remote_name: str) -> None:
+    config = load_config(config_path)
+    config.cloud_provider = provider
+    config.rclone_remote_name = remote_name
+    save_config(config, config_path)
+
+
+def _setup_oauth_remote(
+    config_path: Path,
+    remote_name: str,
+    rclone_type: str,
+    provider: CloudProvider,
+    pretty: str,
+) -> bool:
+    """Create an rclone OAuth remote (browser consent flow) and save config."""
+    rclone_path = get_rclone_path(config_path)
+
+    if remote_name in _list_rclone_remotes(rclone_path):
+        # Never silently clobber an existing remote (it may hold another
+        # tool's credentials, or be a different provider entirely).
+        if typer.confirm(
+            f"rclone remote '{remote_name}' already exists. Use it as configured?",
+            default=True,
+        ):
+            _save_cloud_choice(config_path, provider, remote_name)
+            console.print(f"[green]Using existing rclone remote '{remote_name}'.[/green]")
+            return True
+        console.print(
+            f"[yellow]Pick a different name, e.g.: gsg setup-{rclone_type} gsg-{rclone_type}[/yellow]"
+        )
+        return False
+
+    console.print(
+        f"[cyan]Setting up {pretty}. A browser window will open — "
+        f"sign in and click Allow.[/cyan]"
+    )
+    result = run_rclone(
+        rclone_path,
+        ["config", "create", remote_name, rclone_type],
+        capture_output=False,
+        check=False,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]{pretty} setup failed (rclone exit {result.returncode}).[/red]")
+        return False
+    if remote_name not in _list_rclone_remotes(rclone_path):
+        console.print(f"[red]Remote '{remote_name}' was not created; setup incomplete.[/red]")
+        return False
+
+    _save_cloud_choice(config_path, provider, remote_name)
+    config = load_config(config_path)
+    console.print(
+        f"[green]{pretty} configured.[/green] Backups will be stored in the "
+        f"'{config.remote_root}' folder of your {pretty}."
+    )
+    return True
+
+
+def _run_setup_wizard(ctx: typer.Context) -> bool:
+    """Guided first-run setup. Returns True once cloud storage is configured."""
+    config_path = ctx.obj.get("config_path") or get_config_path()
+    console.print("\n[bold cyan]Welcome to Game Save Genie![/bold cyan]")
+    console.print(
+        "Your game saves will be backed up automatically to cloud storage you own.\n"
+    )
+    console.print("Where should backups go?")
+    console.print("  [bold]1[/bold]  Google Drive  (free 15 GB, sign in via browser)")
+    console.print("  [bold]2[/bold]  OneDrive      (free 5 GB, sign in via browser)")
+    console.print("  [bold]3[/bold]  Railway S3    (advanced: endpoint + keys from railway.app)")
+    console.print("  [bold]4[/bold]  Not now")
+    import click
+
+    choice = typer.prompt(
+        "Choice", default="1", type=click.Choice(["1", "2", "3", "4"]),
+        show_choices=False,
+    )
+
+    if choice == "1":
+        ok = _setup_oauth_remote(
+            config_path, "gdrive", "drive", CloudProvider.GOOGLE_DRIVE, "Google Drive"
+        )
+    elif choice == "2":
+        ok = _setup_oauth_remote(
+            config_path, "onedrive", "onedrive", CloudProvider.ONEDRIVE, "OneDrive"
+        )
+    elif choice == "3":
+        endpoint = typer.prompt("Railway S3 endpoint URL")
+        access_key = typer.prompt("Access key", hide_input=True)
+        secret_key = typer.prompt("Secret key", hide_input=True)
+        bucket = typer.prompt("Bucket name")
+        _configure_railway(
+            config_path, "railway", endpoint, access_key, secret_key, bucket, "auto"
+        )
+        ok = _verify_railway_or_revert(config_path, "railway", bucket)
+    else:
+        console.print("[dim]Skipped cloud setup. Run 'gsg' again any time.[/dim]")
+        return False
+
+    if ok and os.name == "nt" and typer.confirm(
+        "Start Game Save Genie automatically at boot?", default=True
+    ):
+        try:
+            _install_startup(ctx.obj.get("config_path"))
+        except typer.Exit:
+            pass  # could not locate gsg.exe; the message was already printed
+    return ok
+
+
+def _verify_railway_or_revert(config_path: Path, remote_name: str, bucket: str) -> bool:
+    """Confirm the S3 credentials actually work; revert config if they don't.
+
+    Without this, a pasted typo would be declared 'configured', the wizard
+    would never run again, and every upload would fail invisibly at runtime.
+    """
+    rclone_path = get_rclone_path(config_path)
+    result = run_rclone(rclone_path, ["lsd", f"{remote_name}:{bucket}"], check=False)
+    if result.returncode == 0:
+        console.print("[green]Railway S3 configured and verified.[/green]")
+        return True
+    console.print(
+        f"[red]Could not access the bucket with those credentials:[/red]\n"
+        f"{(result.stderr or result.stdout or '').strip()}\n"
+        f"[yellow]Check the endpoint URL, keys, and bucket name, then try again.[/yellow]"
+    )
+    config = load_config(config_path)
+    config.cloud_provider = None
+    config.rclone_remote_name = None
+    save_config(config, config_path)
+    return False
 
 
 @app.command()
