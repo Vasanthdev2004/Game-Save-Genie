@@ -59,7 +59,14 @@ class Game(BaseModel):
 
 
 class SaveVersion(BaseModel):
-    """A backed-up save version."""
+    """A backed-up save version.
+
+    ``local_path`` points at this version's snapshot zip. Versions created
+    before snapshot support may still point at the shared per-game backup
+    directory. ``origin`` distinguishes user/auto backups from safety backups
+    taken automatically before a restore ("safety"), which are excluded from
+    the cloud-newer comparison so a failed restore can be retried.
+    """
 
     id: str
     game_id: str
@@ -72,6 +79,8 @@ class SaveVersion(BaseModel):
     platform: Platform
     cloud_synced: bool = False
     cloud_remote_path: str | None = None
+    sha256: str | None = None
+    origin: str = "user"  # "user", "auto", or "safety"
 
 
 class SyncConfig(BaseModel):
@@ -87,6 +96,7 @@ class SyncConfig(BaseModel):
     remote_root: str = "game-save-genie"
     ludusavi_path: Path | None = None
     rclone_path: Path | None = None
+    storage_limit_gb: float = 5.0  # warn when remote usage nears this (0 = no warning)
 
 
 class BackupResult(BaseModel):

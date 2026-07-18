@@ -18,6 +18,22 @@ def latest_version_id(version_ids: list[str]) -> str | None:
     return sorted(version_ids)[-1]
 
 
+def effective_local_latest(
+    local_latest: str | None, last_restored: str | None
+) -> str | None:
+    """Combine the newest local version with the last cloud version applied.
+
+    A cloud restore does not create a local version row for the restored id,
+    so the sync-state record of the last applied cloud version must also count
+    as "local knowledge" — otherwise the same cloud save would be re-restored
+    on every launch.
+    """
+    candidates = [v for v in (local_latest, last_restored) if v is not None]
+    if not candidates:
+        return None
+    return max(candidates)
+
+
 def should_restore_from_cloud(
     local_latest: str | None, cloud_latest: str | None
 ) -> bool:

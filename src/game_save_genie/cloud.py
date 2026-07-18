@@ -6,13 +6,12 @@ import logging
 import os
 import shutil
 import subprocess
-import tarfile
-import zipfile
 from pathlib import Path
 from typing import Any
 
 import requests
 
+from .archive import safe_extract_tar_gz, safe_extract_zip, zip_directory
 from .config import get_default_binary_dir
 from .models import CloudProvider, CloudSyncResult, Game, SaveVersion
 
@@ -132,7 +131,9 @@ def download_rclone(target_dir: Path) -> Path:
     binary_path = target_dir / binary_name
 
     logger.info("Downloading rclone...")
-    release_info = requests.get(RCLONE_RELEASES_URL, timeout=30).json()
+    release_response = requests.get(RCLONE_RELEASES_URL, timeout=30)
+    release_response.raise_for_status()
+    release_info = release_response.json()
     asset_name = _rclone_asset_name(release_info)
     asset_url: str | None = None
     for asset in release_info.get("assets", []):
@@ -151,11 +152,9 @@ def download_rclone(target_dir: Path) -> Path:
             f.write(chunk)
 
     if asset_name.endswith(".zip"):
-        with zipfile.ZipFile(download_path, "r") as zf:
-            zf.extractall(target_dir)
+        safe_extract_zip(download_path, target_dir)
     elif asset_name.endswith(".tar.gz"):
-        with tarfile.open(download_path, "r:gz") as tf:
-            tf.extractall(target_dir)
+        safe_extract_tar_gz(download_path, target_dir)
     else:
         raise RuntimeError(f"Unsupported archive format: {asset_name}")
 
@@ -250,40 +249,47 @@ def upload_save(
     remote_root: str,
     dry_run: bool = False,
     extra_args: list[str] | None = None,
-    compress: bool = True,
 ) -> CloudSyncResult:
-    """Upload a save version to the configured cloud provider."""
-    remote_path = _remote_path(remote_name, remote_root, game.id, version.id)
+    """Upload a save version as a single zip object.
+
+    ``version.local_path`` is normally the per-version snapshot zip; a
+    directory (legacy versions) is zipped to a temporary file first. Using
+    ``copyto`` (not ``copy``) makes the object land exactly at
+    ``<root>/<game_id>/<version_id>.zip`` instead of nesting inside a
+    directory of the same name.
+    """
+    remote_path = _remote_path(remote_name, remote_root, game.id, f"{version.id}.zip")
     upload_source = version.local_path
-    zip_path: Path | None = None
-
-    if compress and version.local_path.is_dir():
-        # Compress the backup to a zip before uploading
-        zip_path = version.local_path.parent / f"{version.id}.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for file_path in version.local_path.rglob("*"):
-                if file_path.is_file():
-                    arcname = file_path.relative_to(version.local_path)
-                    zf.write(file_path, arcname)
-        upload_source = zip_path
-        remote_path = _remote_path(remote_name, remote_root, game.id, f"{version.id}.zip")
-
-    args = ["copy", str(upload_source), remote_path, "--progress"]
-    if dry_run:
-        args.append("--dry-run")
-    if extra_args:
-        args.extend(extra_args)
+    temp_zip: Path | None = None
 
     try:
-        result = run_rclone(binary, args)
-    except RuntimeError as exc:
-        if zip_path and zip_path.exists():
-            zip_path.unlink(missing_ok=True)
-        return CloudSyncResult(success=False, direction="upload", message=str(exc), remote_path=remote_path)
+        if version.local_path.is_dir():
+            temp_zip = version.local_path.parent / f"{version.id}.zip"
+            zip_directory(version.local_path, temp_zip)
+            upload_source = temp_zip
 
-    # Clean up the zip after successful upload
-    if zip_path and zip_path.exists():
-        zip_path.unlink(missing_ok=True)
+        args = ["copyto", str(upload_source), remote_path, "--progress"]
+        if dry_run:
+            args.append("--dry-run")
+        if extra_args:
+            args.extend(extra_args)
+
+        try:
+            result = run_rclone(binary, args)
+        except RuntimeError as exc:
+            return CloudSyncResult(
+                success=False, direction="upload", message=str(exc), remote_path=remote_path
+            )
+    except OSError as exc:
+        # e.g. disk full while zipping a legacy directory version — report
+        # failure instead of raising into (and killing) the watcher loop.
+        return CloudSyncResult(
+            success=False, direction="upload", message=f"Could not package save: {exc}",
+            remote_path=remote_path,
+        )
+    finally:
+        if temp_zip is not None:
+            temp_zip.unlink(missing_ok=True)
 
     return CloudSyncResult(
         success=True,
@@ -303,68 +309,120 @@ def download_save(
     dry_run: bool = False,
     extra_args: list[str] | None = None,
 ) -> CloudSyncResult:
-    """Download a save version from the cloud."""
+    """Download a save version from the cloud, verified.
+
+    The remote layout for the requested version is resolved from an actual
+    listing rather than probed with ``rclone copy`` exit codes — on bucket
+    remotes (S3), copying a nonexistent prefix exits 0 having transferred
+    nothing, which would otherwise report success with an empty directory.
+    Handles all three historical layouts: flat ``<id>.zip`` objects (current),
+    legacy nested ``<id>.zip/<id>.zip`` directories, and legacy uncompressed
+    ``<id>/`` directories.
+    """
+    entries = list_remote_version_entries(binary, game, remote_name, remote_root)
+    raw_entry = next((raw for vid, raw in entries if vid == version_id), None)
+    if raw_entry is None:
+        return CloudSyncResult(
+            success=False,
+            direction="download",
+            message=f"Could not find version {version_id} in cloud",
+            remote_path="",
+        )
+
     local_dir.mkdir(parents=True, exist_ok=True)
-
-    # Try both directory and .zip paths
-    for suffix in ["", ".zip"]:
-        remote_path = _remote_path(remote_name, remote_root, game.id, f"{version_id}{suffix}")
+    if raw_entry.endswith("/"):
+        # Directory layout (legacy uncompressed, or legacy nested zip dir).
+        remote_path = _remote_path(remote_name, remote_root, game.id, raw_entry.rstrip("/"))
         args = ["copy", remote_path, str(local_dir), "--progress"]
-        if dry_run:
-            args.append("--dry-run")
-        if extra_args:
-            args.extend(extra_args)
-
-        result = run_rclone(binary, args, check=False)
-        if result.returncode == 0:
-            # Extract any downloaded zip files
-            for zip_file in local_dir.glob("*.zip"):
-                with zipfile.ZipFile(zip_file, "r") as zf:
-                    zf.extractall(local_dir)
-                zip_file.unlink(missing_ok=True)
-            return CloudSyncResult(
-                success=True,
-                direction="download",
-                message="Download complete",
-                remote_path=remote_path,
-            )
-
-    return CloudSyncResult(
-        success=False,
-        direction="download",
-        message=f"Could not find version {version_id} in cloud",
-        remote_path="",
-    )
-
-
-def sync_bidirectional(
-    binary: Path,
-    game: Game,
-    local_dir: Path,
-    remote_name: str,
-    remote_root: str,
-    dry_run: bool = False,
-    extra_args: list[str] | None = None,
-) -> CloudSyncResult:
-    """Bidirectional sync between local and cloud for a game."""
-    remote_path = _remote_path(remote_name, remote_root, game.id)
-    args = ["bisync", str(local_dir), remote_path, "--resync", "--progress"]
+    else:
+        # Flat zip object: copyto fails properly if the object is missing.
+        remote_path = _remote_path(remote_name, remote_root, game.id, raw_entry)
+        args = ["copyto", remote_path, str(local_dir / raw_entry), "--progress"]
     if dry_run:
         args.append("--dry-run")
     if extra_args:
         args.extend(extra_args)
 
-    try:
-        result = run_rclone(binary, args)
-    except RuntimeError as exc:
-        return CloudSyncResult(success=False, direction="bidirectional", message=str(exc), remote_path=remote_path)
+    result = run_rclone(binary, args, check=False)
+    if result.returncode != 0:
+        return CloudSyncResult(
+            success=False,
+            direction="download",
+            message=f"Download failed (exit {result.returncode}): "
+            f"{result.stderr or result.stdout}".strip(),
+            remote_path=remote_path,
+        )
 
+    if dry_run:
+        return CloudSyncResult(
+            success=True, direction="download", message="Dry run", remote_path=remote_path
+        )
+
+    # Extract any downloaded zip files (integrity-checked; a corrupt
+    # download fails here instead of half-applying at restore time).
+    try:
+        for zip_file in local_dir.glob("*.zip"):
+            safe_extract_zip(zip_file, local_dir)
+            zip_file.unlink(missing_ok=True)
+    except RuntimeError as exc:
+        return CloudSyncResult(
+            success=False,
+            direction="download",
+            message=f"Downloaded archive failed verification: {exc}",
+            remote_path=remote_path,
+        )
+
+    if not any(local_dir.iterdir()):
+        return CloudSyncResult(
+            success=False,
+            direction="download",
+            message=f"Download of {version_id} produced no files",
+            remote_path=remote_path,
+        )
     return CloudSyncResult(
         success=True,
-        direction="bidirectional",
-        message=result.stdout.strip() or "Bidirectional sync complete",
+        direction="download",
+        message="Download complete",
         remote_path=remote_path,
     )
+
+
+def parse_lsf_entries(stdout: str) -> list[tuple[str, str]]:
+    """Parse ``rclone lsf`` output into ``(version_id, raw_entry)`` pairs.
+
+    Raw entries keep their trailing ``/`` for directories (legacy uncompressed
+    uploads) so callers can tell files from directories. Entries starting with
+    ``_`` are reserved for non-version objects and skipped. The ``.zip``
+    suffix is stripped from the version id so compressed and uncompressed
+    uploads share one id namespace; duplicates keep the first entry seen.
+    """
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for line in stdout.splitlines():
+        raw = line.strip("\r\n")
+        version_id = raw.strip("/")
+        if not version_id or version_id.startswith("_"):
+            continue
+        if version_id.endswith(".zip"):
+            version_id = version_id[:-4]
+        if version_id not in seen:
+            seen.add(version_id)
+            entries.append((version_id, raw))
+    return entries
+
+
+def list_remote_version_entries(
+    binary: Path,
+    game: Game,
+    remote_name: str,
+    remote_root: str,
+) -> list[tuple[str, str]]:
+    """List cloud versions for a game as ``(version_id, raw_entry)`` pairs."""
+    remote_path = _remote_path(remote_name, remote_root, game.id)
+    result = run_rclone(binary, ["lsf", remote_path], check=False)
+    if result.returncode != 0:
+        return []
+    return parse_lsf_entries(result.stdout)
 
 
 def list_remote_versions(
@@ -374,20 +432,51 @@ def list_remote_versions(
     remote_root: str,
 ) -> list[str]:
     """List available version IDs stored in the cloud for a game."""
-    remote_path = _remote_path(remote_name, remote_root, game.id)
-    # List both directories and files (for compressed .zip uploads)
-    result = run_rclone(binary, ["lsf", remote_path], check=False)
-    if result.returncode != 0:
+    return [vid for vid, _ in list_remote_version_entries(binary, game, remote_name, remote_root)]
+
+
+def select_entries_to_prune(
+    entries: list[tuple[str, str]], keep: int
+) -> list[tuple[str, str]]:
+    """Pick the oldest remote entries beyond ``keep``, newest always retained.
+
+    Pure so the retention policy is unit-testable. Version ids are UTC
+    timestamps, so lexicographic order equals chronological order.
+    """
+    if keep < 1 or len(entries) <= keep:
         return []
-    versions: list[str] = []
-    for line in result.stdout.splitlines():
-        entry = line.strip("/\r\n")
-        if entry and not entry.startswith("_"):
-            # Strip .zip extension if present
-            if entry.endswith(".zip"):
-                entry = entry[:-4]
-            versions.append(entry)
-    return versions
+    ordered = sorted(entries, key=lambda pair: pair[0])
+    return ordered[: len(ordered) - keep]
+
+
+def prune_remote_versions(
+    binary: Path,
+    game: Game,
+    remote_name: str,
+    remote_root: str,
+    keep: int,
+) -> list[str]:
+    """Delete the oldest cloud versions beyond ``keep`` for a game.
+
+    Fail-safe by design: if the remote listing fails nothing is deleted, the
+    newest version is never deleted, and individual delete failures are
+    logged but never raised. Returns the version ids actually deleted.
+    """
+    entries = list_remote_version_entries(binary, game, remote_name, remote_root)
+    deleted: list[str] = []
+    for version_id, raw_entry in select_entries_to_prune(entries, keep):
+        if raw_entry.endswith("/"):
+            # Legacy uncompressed upload: a directory tree.
+            target = _remote_path(remote_name, remote_root, game.id, raw_entry.rstrip("/"))
+            result = run_rclone(binary, ["purge", target], check=False)
+        else:
+            target = _remote_path(remote_name, remote_root, game.id, raw_entry)
+            result = run_rclone(binary, ["deletefile", target], check=False)
+        if result.returncode == 0:
+            deleted.append(version_id)
+        else:
+            logger.warning("Failed to prune cloud version %s for %s", version_id, game.id)
+    return deleted
 
 
 def download_latest_save(

@@ -11,12 +11,12 @@ from game_save_genie.ludusavi import backup_game
 from game_save_genie.models import Game, Platform
 
 
-def _sample_ludusavi_output(files: dict[str, dict[str, str | int]]) -> str:
+def _sample_ludusavi_output(files: dict[str, dict[str, object]]) -> str:
     """Build a JSON string matching Ludusavi's --api backup response shape."""
     changed_new = sum(1 for f in files.values() if f.get("change") == "New")
     changed_diff = sum(1 for f in files.values() if f.get("change") == "Different")
     changed_same = sum(1 for f in files.values() if f.get("change") == "Same")
-    total_bytes = sum(int(f.get("bytes", 0)) for f in files.values())
+    total_bytes = sum(int(str(f.get("bytes", 0))) for f in files.values())
     return json.dumps({
         "overall": {
             "totalGames": 1,

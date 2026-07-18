@@ -6,13 +6,12 @@ import json
 import logging
 import os
 import subprocess
-import tarfile
-import zipfile
 from pathlib import Path
 from typing import Any
 
 import requests
 
+from .archive import safe_extract_tar_gz, safe_extract_zip
 from .config import get_default_binary_dir
 from .models import BackupResult, Game, GameSavePath, Platform, SaveVersion
 
@@ -45,7 +44,9 @@ def download_ludusavi(target_dir: Path) -> Path:
     binary_path = target_dir / binary_name
 
     logger.info("Downloading Ludusavi...")
-    release_info = requests.get(LUDUSAVI_RELEASES_URL, timeout=30).json()
+    release_response = requests.get(LUDUSAVI_RELEASES_URL, timeout=30)
+    release_response.raise_for_status()
+    release_info = release_response.json()
     asset_name = _ludusavi_asset_name(release_info)
     asset_url: str | None = None
     for asset in release_info.get("assets", []):
@@ -64,11 +65,9 @@ def download_ludusavi(target_dir: Path) -> Path:
             f.write(chunk)
 
     if asset_name.endswith(".zip"):
-        with zipfile.ZipFile(download_path, "r") as zf:
-            zf.extractall(target_dir)
+        safe_extract_zip(download_path, target_dir)
     elif asset_name.endswith((".tar.gz", ".tgz")):
-        with tarfile.open(download_path, "r:gz") as tf:
-            tf.extractall(target_dir)
+        safe_extract_tar_gz(download_path, target_dir)
     else:
         raise RuntimeError(f"Unsupported archive format: {asset_name}")
 
@@ -154,6 +153,43 @@ def find_game_saves(binary: Path, game: Game) -> list[GameSavePath]:
     return paths
 
 
+def _wine_prefix_args(game: Game) -> list[str]:
+    if game.platform == Platform.LINUX and any(p.wine_prefix_path for p in game.save_paths):
+        wine_prefix = next(p.wine_prefix_path for p in game.save_paths if p.wine_prefix_path)
+        if wine_prefix:
+            return ["--wine-prefix", str(wine_prefix)]
+    return []
+
+
+def preview_backup(binary: Path, game: Game, backup_dir: Path) -> BackupResult:
+    """Report what a backup would change, without writing anything."""
+    game_backup_dir = backup_dir / game.id
+    args = ["backup", game.title, "--api", "--preview", "--path", str(game_backup_dir)]
+    args.extend(_wine_prefix_args(game))
+
+    try:
+        result = run_ludusavi(binary, args)
+    except RuntimeError as exc:
+        return BackupResult(success=False, game_id=game.id, message=str(exc))
+
+    data = _parse_json(result.stdout)
+    files_data = data.get("games", {}).get(game.title, {}).get("files", {})
+    files_changed = sum(
+        1 for f in files_data.values() if f.get("change") in ("New", "Different")
+    )
+    size_bytes = sum(int(f.get("bytes", 0)) for f in files_data.values())
+    if files_changed == 0:
+        message = "No changes to back up"
+    else:
+        message = (
+            f"Would back up {files_changed} changed of {len(files_data)} file(s) "
+            f"({_human_size(size_bytes)})"
+        )
+    return BackupResult(
+        success=True, game_id=game.id, message=message, files_changed=files_changed
+    )
+
+
 def backup_game(
     binary: Path,
     game: Game,
@@ -165,10 +201,7 @@ def backup_game(
     game_backup_dir.mkdir(parents=True, exist_ok=True)
 
     args = ["backup", game.title, "--api", "--force", "--path", str(game_backup_dir)]
-    if game.platform == Platform.LINUX and any(p.wine_prefix_path for p in game.save_paths):
-        wine_prefix = next(p.wine_prefix_path for p in game.save_paths if p.wine_prefix_path)
-        if wine_prefix:
-            args.extend(["--wine-prefix", str(wine_prefix)])
+    args.extend(_wine_prefix_args(game))
 
     try:
         result = run_ludusavi(binary, args)
@@ -219,15 +252,6 @@ def backup_game(
     )
 
 
-def restore_game(
-    binary: Path,
-    game: Game,
-    version: SaveVersion,
-) -> dict[str, Any]:
-    """Restore a save version using Ludusavi."""
-    return restore_from_backup(binary, game, version.local_path)
-
-
 def restore_from_backup(
     binary: Path,
     game: Game,
@@ -240,10 +264,7 @@ def restore_from_backup(
     extracted cloud save provides.
     """
     args = ["restore", game.title, "--api", "--force", "--path", str(backup_path)]
-    if game.platform == Platform.LINUX and any(p.wine_prefix_path for p in game.save_paths):
-        wine_prefix = next(p.wine_prefix_path for p in game.save_paths if p.wine_prefix_path)
-        if wine_prefix:
-            args.extend(["--wine-prefix", str(wine_prefix)])
+    args.extend(_wine_prefix_args(game))
 
     result = run_ludusavi(binary, args)
     return _parse_json(result.stdout)

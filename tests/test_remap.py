@@ -1,6 +1,7 @@
 """Tests for path remapping."""
 
 from pathlib import Path
+from typing import Any
 
 from game_save_genie.models import Game, Platform
 from game_save_genie.remap import remap_paths, _remap_single_path
@@ -14,7 +15,7 @@ def test_windows_user_profile_remap() -> None:
 
 
 def test_wine_to_windows_remap() -> None:
-    mapping = {
+    mapping: dict[str, Any] = {
         "games": {
             "Game": {
                 "files": {

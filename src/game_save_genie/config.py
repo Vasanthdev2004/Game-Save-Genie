@@ -62,9 +62,15 @@ def save_config(config: SyncConfig, config_path: Path | None = None) -> None:
         yaml.dump(config.model_dump(mode="json"), f, sort_keys=False, allow_unicode=True)
 
 
+def get_games_path(config_path: Path | None = None) -> Path:
+    """Return the tracked-games file path (next to the config file)."""
+    base = config_path.parent if config_path else get_config_dir()
+    return base / "games.yaml"
+
+
 def load_games(config_path: Path | None = None) -> list[Game]:
     """Load the tracked games list from file."""
-    path = _games_path(config_path)
+    path = get_games_path(config_path)
     if not path.exists():
         return []
 
@@ -76,7 +82,7 @@ def load_games(config_path: Path | None = None) -> list[Game]:
 
 def save_games(games: list[Game], config_path: Path | None = None) -> None:
     """Save the tracked games list to file."""
-    path = _games_path(config_path)
+    path = get_games_path(config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         yaml.dump(
@@ -85,11 +91,6 @@ def save_games(games: list[Game], config_path: Path | None = None) -> None:
             sort_keys=False,
             allow_unicode=True,
         )
-
-
-def _games_path(config_path: Path | None = None) -> Path:
-    base = config_path.parent if config_path else get_config_dir()
-    return base / "games.yaml"
 
 
 def _default_config() -> SyncConfig:

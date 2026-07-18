@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from . import __version__  # noqa: F401
+from . import __version__
+from .archive import safe_extract_zip, sha256_file, zip_directory
 from .cloud import (
     _remote_path,
     download_save,
     get_rclone_path,
     get_remote_size,
     list_remote_versions,
+    prune_remote_versions,
     run_rclone,
     upload_save,
     write_railway_s3_config,
@@ -25,6 +29,7 @@ from .cloud import (
 from .config import (
     get_config_path,
     get_data_dir,
+    get_games_path,
     load_config,
     load_games,
     save_config,
@@ -34,8 +39,8 @@ from .database import Database
 from .ludusavi import (
     backup_game,
     get_ludusavi_path,
+    preview_backup,
     restore_from_backup,
-    restore_game,
     scan_games,
 )
 from .models import (
@@ -49,7 +54,7 @@ from .models import (
 )
 from .notify import notify, setup_file_logging
 from .remap import _current_platform
-from .sync import latest_version_id, should_restore_from_cloud
+from .sync import effective_local_latest, latest_version_id, should_restore_from_cloud
 from .watcher import GameWatcher
 
 app = typer.Typer(help="Game Save Genie - self-hosted cloud save sync")
@@ -64,11 +69,21 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(f"Game Save Genie {__version__}")
+        raise typer.Exit()
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
     config: Optional[Path] = typer.Option(None, "--config", help="Path to config file"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
+    version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True,
+        help="Show version and exit",
+    ),
 ) -> None:
     """Global options."""
     _configure_logging(verbose)
@@ -88,7 +103,8 @@ def init(
         config.backup_dir = backup_dir
     config.backup_dir.mkdir(parents=True, exist_ok=True)
     save_config(config, config_path)
-    save_games([], config_path)
+    if not get_games_path(config_path).exists():
+        save_games([], config_path)
     Database(get_data_dir() / "versions.db")
     console.print(f"[green]Initialized Game Save Genie at {config_path.parent}[/green]")
     console.print(f"Backups: {config.backup_dir}")
@@ -133,7 +149,7 @@ def scan(
 
     for title, info in games_data.items():
         files = info.get("files", {})
-        size = sum(f.get("size", 0) for f in files.values())
+        size = sum(int(f.get("bytes", 0)) for f in files.values())
         save_paths = list(files.keys())
         detected = detect_launcher(
             title, save_paths, steam_games, epic_games, xbox_games
@@ -241,13 +257,17 @@ def remove(
     console.print(f"[green]Removed: {game.title} ({game_id})[/green]")
 
     if purge:
-        # Delete local backups
+        # Delete local backups (live backup dir + per-version snapshots)
+        import shutil
+
         config = load_config(config_path)
-        local_backup = config.backup_dir / game_id
-        if local_backup.exists():
-            import shutil
-            shutil.rmtree(local_backup, ignore_errors=True)
-            console.print(f"  [dim]Deleted local backups: {local_backup}[/dim]")
+        for local_dir in (
+            config.backup_dir / game_id,
+            config.backup_dir / "_versions" / game_id,
+        ):
+            if local_dir.exists():
+                shutil.rmtree(local_dir, ignore_errors=True)
+                console.print(f"  [dim]Deleted local backups: {local_dir}[/dim]")
 
         # Delete cloud saves
         if game.cloud_provider and config.rclone_remote_name:
@@ -283,9 +303,12 @@ def status(ctx: typer.Context) -> None:
         versions = db.get_versions(game.id)
         last_backup = "never"
         cloud_synced = "no"
-        if versions:
-            last_backup = versions[0].created_at.strftime("%Y-%m-%d %H:%M")
-            cloud_synced = "yes" if versions[0].cloud_synced else "pending"
+        # Judge sync status by the newest real backup — safety backups are
+        # local-only by design and would otherwise show as forever-pending.
+        display = next((v for v in versions if v.origin != "safety"), None)
+        if display:
+            last_backup = display.created_at.strftime("%Y-%m-%d %H:%M")
+            cloud_synced = "yes" if display.cloud_synced else "pending"
 
         cloud_status = game.cloud_provider.value if game.cloud_provider else "none"
         table.add_row(
@@ -310,9 +333,16 @@ def status(ctx: typer.Context) -> None:
             objects, remote_size = get_remote_size(
                 rclone_path, config.rclone_remote_name, config.remote_root
             )
-            console.print(f"[dim]Railway cloud: {objects} objects, {_human_size(remote_size)}[/dim]")
+            console.print(f"[dim]Cloud storage: {objects} objects, {_human_size(remote_size)}[/dim]")
+            limit_bytes = int(config.storage_limit_gb * 1024**3)
+            if limit_bytes > 0 and remote_size >= 0.8 * limit_bytes:
+                console.print(
+                    f"[yellow]Cloud storage is at {remote_size / limit_bytes:.0%} of the "
+                    f"{config.storage_limit_gb:g} GB limit. Lower max_versions or run "
+                    f"'gsg remove --purge' on unused games.[/yellow]"
+                )
         except RuntimeError:
-            console.print("[dim]Railway cloud: unable to connect[/dim]")
+            console.print("[dim]Cloud storage: unable to connect[/dim]")
 
 
 @app.command()
@@ -336,10 +366,14 @@ def backup(
         raise typer.Exit(1)
 
     for game in targets:
+        if dry_run:
+            preview = preview_backup(ludusavi_path, game, config.backup_dir)
+            console.print(f"{'[cyan]' if preview.success else '[red]'}{game.title}: {preview.message}[/]")
+            continue
         result = _run_backup(game, config, db, ludusavi_path, label)
         console.print(f"{'[green]' if result.success else '[red]'}{result.message}[/]")
         if result.success and result.version and not no_cloud and game.cloud_provider:
-            _cloud_upload(ctx, game, result.version, dry_run)
+            _cloud_upload(ctx, game, result.version, dry_run=False)
 
 
 @app.command()
@@ -348,6 +382,9 @@ def restore(
     game_id: str = typer.Argument(..., help="Game ID to restore"),
     version_id: Optional[str] = typer.Option(None, "--version", help="Version ID (omit for latest)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen"),
+    no_safety: bool = typer.Option(
+        False, "--no-safety", help="Skip the pre-restore safety backup (not recommended)"
+    ),
 ) -> None:
     """Restore a save version for a game."""
     config_path = ctx.obj.get("config_path")
@@ -364,7 +401,7 @@ def restore(
         versions = db.get_versions(game_id)
         version = versions[0] if versions else None
 
-    if not version:
+    if not version or version.game_id != game_id:
         console.print(f"[red]No local version found for {game_id}.[/red]")
         raise typer.Exit(1)
 
@@ -373,7 +410,32 @@ def restore(
         return
 
     ludusavi_path = get_ludusavi_path(config_path)
-    restore_game(ludusavi_path, game, version)
+    config = load_config(config_path)
+
+    # Verify and stage the snapshot BEFORE touching anything on disk.
+    restore_source = _materialize_version(version, game)
+    if restore_source is None:
+        raise typer.Exit(1)
+
+    # Secure the current on-disk state so this restore can be undone.
+    if not no_safety:
+        safety = _run_backup(
+            game, config, db, ludusavi_path,
+            label="Safety backup before restore", origin="safety",
+            protect_id=version.id,
+        )
+        if not safety.success:
+            console.print(
+                f"[red]Safety backup failed ({safety.message}); aborting restore. "
+                f"Pass --no-safety to restore anyway.[/red]"
+            )
+            raise typer.Exit(1)
+
+    try:
+        restore_from_backup(ludusavi_path, game, restore_source)
+    except RuntimeError as exc:
+        console.print(f"[red]Restore failed: {exc}[/red]")
+        raise typer.Exit(1) from exc
     console.print(f"[green]Restored {game.title} from version {version.id}[/green]")
 
 
@@ -423,8 +485,11 @@ def cloud_list(
         console.print("[red]Game has no cloud provider configured.[/red]")
         raise typer.Exit(1)
 
+    remote_name = game.remote_path or config.rclone_remote_name
+    if not remote_name:
+        console.print("[red]No rclone remote configured. Run 'gsg setup-railway' first.[/red]")
+        raise typer.Exit(1)
     rclone_path = get_rclone_path(config_path)
-    remote_name = game.remote_path or config.rclone_remote_name or config.remote_root
     version_ids = list_remote_versions(rclone_path, game, remote_name, config.remote_root)
     if not version_ids:
         console.print("[yellow]No cloud versions found.[/yellow]")
@@ -438,9 +503,17 @@ def watch(ctx: typer.Context) -> None:
     """Watch running games and auto-backup on close."""
     config_path = ctx.obj.get("config_path")
     config = load_config(config_path)
-    games = load_games(config_path)
+    games = _watchable_games(load_games(config_path))
     if not config.auto_sync_on_game_close:
         console.print("[yellow]Auto-sync on game close is disabled in config.[/yellow]")
+        raise typer.Exit(1)
+    if not games:
+        console.print("[yellow]No games with auto-sync enabled. Run 'gsg add' or 'gsg resume'.[/yellow]")
+        raise typer.Exit(1)
+
+    lock = _acquire_instance_lock()
+    if lock is None:
+        console.print("[red]Another gsg watcher is already running.[/red]")
         raise typer.Exit(1)
 
     db = Database(get_data_dir() / "versions.db")
@@ -448,18 +521,24 @@ def watch(ctx: typer.Context) -> None:
 
     def on_close(game: Game, proc_info: object) -> None:
         console.print(f"[cyan]Game closed: {game.title}. Backing up...[/cyan]")
-        result = _run_backup(game, config, db, ludusavi_path, label=f"Auto-backup on {datetime.now()}")
+        result = _run_backup(
+            game, config, db, ludusavi_path,
+            label=f"Auto-backup on {datetime.now()}", origin="auto",
+        )
         console.print(f"{'[green]' if result.success else '[red]'}{result.message}[/]")
         if result.success and result.version and game.cloud_provider:
             _cloud_upload(ctx, game, result.version, dry_run=False)
 
     watcher = GameWatcher(games)
     watcher.set_on_game_close(on_close)
+    watcher.prime()
     console.print("[green]Watching for games. Press Ctrl+C to stop.[/green]")
     try:
         watcher.watch_loop()
     except KeyboardInterrupt:
         console.print("[yellow]Stopped watching.[/yellow]")
+    finally:
+        lock.close()
 
 
 @app.command()
@@ -503,6 +582,7 @@ def auto(
     # Build game list: only non-Steam/Epic/Xbox games
     existing_games = load_games(config_path)
     existing_ids = {g.id for g in existing_games}
+    existing_titles = {g.title for g in existing_games}
     new_games: list[Game] = []
 
     for title, info in games_data.items():
@@ -513,7 +593,7 @@ def auto(
             continue
 
         game_id = _slugify(title)
-        if game_id in existing_ids:
+        if not game_id or game_id in existing_ids or title in existing_titles:
             continue
 
         game = Game(
@@ -535,9 +615,14 @@ def auto(
         console.print("[dim]No new games found. Using existing tracked games.[/dim]")
 
     # Load all tracked games for watching
-    all_tracked = load_games(config_path)
+    all_tracked = _watchable_games(load_games(config_path))
     if not all_tracked:
         console.print("[yellow]No games to watch. Play some games and run 'gsg auto' again.[/yellow]")
+        raise typer.Exit(1)
+
+    lock = _acquire_instance_lock()
+    if lock is None:
+        console.print("[red]Another gsg watcher is already running.[/red]")
         raise typer.Exit(1)
 
     db = Database(get_data_dir() / "versions.db")
@@ -546,12 +631,25 @@ def auto(
     def on_start(game: Game, proc_info: ProcessInfo) -> None:
         console.print(f"[green]Game started: {game.title}[/green]")
         notify("Game started", game.title)
-        _remember_executable(game, proc_info, config_path)
-        _auto_restore_on_start(game, config, db, rclone_path, ludusavi_path)
+        # Only learn the executable when exactly one process matches —
+        # otherwise a transient launcher/anti-cheat helper could be
+        # persisted and the real game would never match again.
+        if len(watcher.running_pids(game.id)) == 1:
+            _remember_executable(game, proc_info, config_path)
+        # Never restore under a live process; just tell the user.
+        if _cloud_newer_version(game, config, db, rclone_path) is not None:
+            notify(
+                "Newer cloud save exists",
+                f"{game.title}: not applied because the game is running. "
+                f"It will be restored after you quit.",
+            )
 
     def on_close(game: Game, proc_info: ProcessInfo) -> None:
-        console.print(f"[cyan]Game closed: {game.title}. Backing up to Railway S3...[/cyan]")
-        result = _run_backup(game, config, db, ludusavi_path, label=f"Auto-backup on {datetime.now()}")
+        console.print(f"[cyan]Game closed: {game.title}. Backing up to cloud...[/cyan]")
+        result = _run_backup(
+            game, config, db, ludusavi_path,
+            label=f"Auto-backup on {datetime.now()}", origin="auto",
+        )
         console.print(f"{'[green]' if result.success else '[red]'}{result.message}[/]")
         if result.success and result.version and result.files_changed > 0:
             _cloud_upload(ctx, game, result.version, dry_run=False)
@@ -559,7 +657,10 @@ def auto(
 
     def on_periodic(game: Game) -> None:
         console.print(f"[cyan]Periodic backup: {game.title}...[/cyan]")
-        result = _run_backup(game, config, db, ludusavi_path, label=f"Periodic backup on {datetime.now()}")
+        result = _run_backup(
+            game, config, db, ludusavi_path,
+            label=f"Periodic backup on {datetime.now()}", origin="auto",
+        )
         if result.success and result.version and result.files_changed > 0:
             console.print(f"[green]{result.message}[/green]")
             _cloud_upload(ctx, game, result.version, dry_run=False)
@@ -567,11 +668,26 @@ def auto(
         else:
             console.print(f"[dim]{result.message}[/dim]")
 
-    watcher = GameWatcher(all_tracked, periodic_interval=periodic)
+    def on_idle(game: Game) -> None:
+        _auto_restore_if_idle(game, config, db, rclone_path, ludusavi_path)
+
+    # Cloud restores only ever run for games that are NOT running: once at
+    # startup, then at every idle check. Restoring on game start would race
+    # the live process (it loads the old save, then overwrites the restored
+    # files on exit).
+    idle_interval = periodic if periodic > 0 else 600.0
+    watcher = GameWatcher(all_tracked, periodic_interval=periodic, idle_interval=idle_interval)
     watcher.set_on_game_start(on_start)
     watcher.set_on_game_close(on_close)
     if periodic > 0:
         watcher.set_on_periodic_backup(on_periodic)
+    watcher.set_on_idle_check(on_idle)
+    watcher.prime()
+
+    console.print("[cyan]Checking cloud for newer saves...[/cyan]")
+    for game in all_tracked:
+        if not watcher.is_running(game.id):
+            _auto_restore_if_idle(game, config, db, rclone_path, ludusavi_path)
 
     console.print(f"\n[green]Auto-backup active. Watching {len(all_tracked)} game(s).[/green]")
     if periodic > 0:
@@ -581,6 +697,8 @@ def auto(
         watcher.watch_loop(interval=interval)
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopped watching.[/yellow]")
+    finally:
+        lock.close()
 
 
 def _install_startup() -> None:
@@ -616,7 +734,7 @@ def _uninstall_startup() -> None:
         console.print("[yellow]Not found in startup.[/yellow]")
 
 
-@app.command()
+@app.command(name="config")
 def config_cmd(
     ctx: typer.Context,
     backup_dir: Optional[Path] = typer.Option(None, "--backup-dir", help="Set backup directory"),
@@ -626,31 +744,81 @@ def config_cmd(
     remote_root: Optional[str] = typer.Option(None, "--remote-root", help="Remote root path or bucket"),
     ludusavi_path: Optional[Path] = typer.Option(None, "--ludusavi", help="Path to ludusavi binary"),
     rclone_path: Optional[Path] = typer.Option(None, "--rclone", help="Path to rclone binary"),
+    storage_limit: Optional[float] = typer.Option(
+        None, "--storage-limit", help="Cloud storage limit in GB for usage warnings (0 = off)"
+    ),
 ) -> None:
-    """View or edit configuration."""
+    """View configuration, or edit it by passing options."""
     config_path = ctx.obj.get("config_path") or get_config_path()
     config = load_config(config_path)
+    changed = False
     if backup_dir:
         config.backup_dir = backup_dir
+        changed = True
     if max_versions is not None:
         config.max_versions = max_versions
+        changed = True
     if cloud_provider:
         config.cloud_provider = cloud_provider
+        changed = True
     if rclone_remote_name:
         config.rclone_remote_name = rclone_remote_name
+        changed = True
     if remote_root:
         config.remote_root = remote_root
+        changed = True
     if ludusavi_path:
         config.ludusavi_path = ludusavi_path
+        changed = True
     if rclone_path:
         config.rclone_path = rclone_path
-    save_config(config, config_path)
-    console.print(f"[green]Configuration saved to {config_path}[/green]")
+        changed = True
+    if storage_limit is not None:
+        config.storage_limit_gb = storage_limit
+        changed = True
+
+    if changed:
+        save_config(config, config_path)
+        console.print(f"[green]Configuration saved to {config_path}[/green]")
+    else:
+        console.print(f"[dim]Configuration at {config_path}[/dim]")
     console.print(f"backup_dir: {config.backup_dir}")
     console.print(f"max_versions: {config.max_versions}")
     console.print(f"cloud_provider: {config.cloud_provider}")
     console.print(f"rclone_remote_name: {config.rclone_remote_name}")
     console.print(f"remote_root: {config.remote_root}")
+    console.print(f"storage_limit_gb: {config.storage_limit_gb:g}")
+
+
+@app.command()
+def pause(
+    ctx: typer.Context,
+    game_id: str = typer.Argument(..., help="Game ID to pause"),
+) -> None:
+    """Exclude a game from watching/auto-backup without removing it."""
+    _set_auto_sync(ctx, game_id, enabled=False)
+
+
+@app.command()
+def resume(
+    ctx: typer.Context,
+    game_id: str = typer.Argument(..., help="Game ID to resume"),
+) -> None:
+    """Re-enable watching/auto-backup for a paused game."""
+    _set_auto_sync(ctx, game_id, enabled=True)
+
+
+def _set_auto_sync(ctx: typer.Context, game_id: str, enabled: bool) -> None:
+    config_path = ctx.obj.get("config_path")
+    games = load_games(config_path)
+    game = next((g for g in games if g.id == game_id), None)
+    if not game:
+        console.print(f"[red]Game not found: {game_id}[/red]")
+        raise typer.Exit(1)
+    game.auto_sync = enabled
+    save_games(games, config_path)
+    state = "resumed" if enabled else "paused"
+    console.print(f"[green]{game.title}: auto-sync {state}.[/green]")
 
 
 @app.command()
@@ -662,7 +830,9 @@ def setup_rclone(
     config_path = ctx.obj.get("config_path")
     rclone_path = get_rclone_path(config_path)
     console.print(f"[cyan]Launching rclone config for remote '{remote_name}'...[/cyan]")
-    console.print("Follow the interactive prompts. When done, set the remote name with --remote.")
+    console.print(
+        f"Follow the interactive prompts. When done, run: gsg config --rclone-remote {remote_name}"
+    )
     run_rclone(rclone_path, ["config"], capture_output=False, check=False)
 
 
@@ -698,7 +868,7 @@ def usage(ctx: typer.Context) -> None:
 
     local_size = sum(
         f.stat().st_size for f in config.backup_dir.rglob("*") if f.is_file()
-    )
+    ) if config.backup_dir.exists() else 0
     version_count = db.count_versions()
 
     table = Table(title="Storage Usage")
@@ -720,26 +890,154 @@ def usage(ctx: typer.Context) -> None:
     console.print(table)
 
 
+def _watchable_games(games: list[Game]) -> list[Game]:
+    """Filter to games the watcher should act on, honoring per-game flags."""
+    watched = [g for g in games if g.auto_sync and g.sync_enabled]
+    skipped = len(games) - len(watched)
+    if skipped:
+        console.print(f"[dim]{skipped} game(s) excluded (auto-sync paused).[/dim]")
+    return watched
+
+
+def _acquire_instance_lock() -> Optional[IO[str]]:
+    """Take an exclusive watcher lock; None if another instance holds it.
+
+    The returned handle must stay open for the watcher's lifetime — the OS
+    releases the lock when the process exits, so a crashed watcher never
+    leaves a stale lock behind.
+    """
+    lock_path = get_data_dir() / "gsg.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        handle.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
+def _snapshot_version(version: SaveVersion, config: SyncConfig) -> None:
+    """Freeze the live backup dir into an immutable per-version zip.
+
+    This is what makes 'gsg restore --version' real: without it every
+    version row would point at the same directory, which each new backup
+    overwrites in place.
+    """
+    zip_path = config.backup_dir / "_versions" / version.game_id / f"{version.id}.zip"
+    digest = zip_directory(version.local_path, zip_path)
+    version.local_path = zip_path
+    version.sha256 = digest
+
+
+# Safety backups are kept in their own small pool so they never evict real
+# user/auto backups from the max_versions budget.
+_MAX_SAFETY_VERSIONS = 3
+
+
 def _run_backup(
     game: Game,
     config: SyncConfig,
     db: Database,
     ludusavi_path: Path,
     label: Optional[str] = None,
+    origin: str = "user",
+    protect_id: Optional[str] = None,
 ) -> BackupResult:
     result = backup_game(ludusavi_path, game, config.backup_dir, label)
     if result.success and result.version:
+        try:
+            _snapshot_version(result.version, config)
+        except OSError as exc:
+            console.print(
+                f"[yellow]Snapshot failed for {game.title}: {exc}. "
+                f"Version will reference the live backup directory.[/yellow]"
+            )
+        result.version.origin = origin
         db.add_version(result.version)
-        _prune_old_versions(db, game.id, config.max_versions)
+        _prune_old_versions(db, game.id, config.max_versions, protect_id=protect_id)
     return result
 
 
-def _prune_old_versions(db: Database, game_id: str, max_versions: int) -> None:
-    versions = db.get_versions(game_id)
-    if len(versions) <= max_versions:
+def _prune_old_versions(
+    db: Database,
+    game_id: str,
+    max_versions: int,
+    protect_id: Optional[str] = None,
+) -> None:
+    if max_versions < 1:
         return
-    for old in versions[max_versions:]:
+    versions = db.get_versions(game_id)
+    regular = [v for v in versions if v.origin != "safety"]
+    safety = [v for v in versions if v.origin == "safety"]
+    for old in regular[max_versions:] + safety[_MAX_SAFETY_VERSIONS:]:
+        if old.id == protect_id:
+            continue
+        # Snapshot zips are per-version and safe to delete; legacy directory
+        # paths are the shared live backup dir and must never be removed here.
+        if old.local_path.suffix == ".zip" and old.local_path.is_file():
+            try:
+                old.local_path.unlink()
+            except OSError as exc:
+                # Locked by AV/indexer/another process: keep the DB row so
+                # the next prune retries, and never crash the watcher.
+                logging.getLogger(__name__).warning(
+                    "Could not delete snapshot %s: %s", old.local_path, exc
+                )
+                continue
         db.delete_version(old.id)
+
+
+def _materialize_version(version: SaveVersion, game: Game) -> Optional[Path]:
+    """Stage a version's Ludusavi backup structure for restore, verified.
+
+    Returns a directory ready to hand to ``ludusavi restore --path``, or
+    None if the snapshot is missing or fails verification. Never touches
+    live save files.
+    """
+    staging = get_data_dir() / "restore_staging" / version.game_id
+
+    if version.local_path.is_dir():
+        # Legacy pre-snapshot version: all such versions share the live
+        # backup dir, which only holds the newest backup's content. Copy it
+        # to staging so the following safety backup can't overwrite it.
+        console.print(
+            "[yellow]This version predates snapshot storage; restoring the newest "
+            "backed-up content, which may be newer than the selected version.[/yellow]"
+        )
+        import shutil
+
+        _reset_dir(staging)
+        shutil.copytree(version.local_path, staging, dirs_exist_ok=True)
+        return staging
+
+    if not version.local_path.is_file():
+        console.print(f"[red]Snapshot not found: {version.local_path}[/red]")
+        return None
+    if version.sha256 and sha256_file(version.local_path) != version.sha256:
+        console.print(
+            "[red]Snapshot failed its integrity check (sha256 mismatch); not restoring.[/red]"
+        )
+        return None
+
+    _reset_dir(staging)
+    try:
+        safe_extract_zip(version.local_path, staging)
+    except RuntimeError as exc:
+        console.print(f"[red]Snapshot extraction failed: {exc}[/red]")
+        return None
+    return staging
 
 
 def _cloud_upload(
@@ -768,9 +1066,14 @@ def _cloud_upload(
         extra_args=config.custom_rclone_args,
     )
     console.print(f"[{'green' if result.success else 'red'}]{result.message}[/]")
-    if result.success:
+    if result.success and not dry_run:
         db = Database(get_data_dir() / "versions.db")
         db.mark_cloud_synced(version.id, result.remote_path)
+        pruned = prune_remote_versions(
+            rclone_path, game, remote_name, config.remote_root, keep=config.max_versions
+        )
+        if pruned:
+            console.print(f"[dim]Pruned {len(pruned)} old cloud version(s).[/dim]")
 
 
 def _cloud_restore_dir(game_id: str) -> Path:
@@ -802,38 +1105,62 @@ def _remember_executable(
             break
 
 
-def _auto_restore_on_start(
+def _cloud_newer_version(
+    game: Game,
+    config: SyncConfig,
+    db: Database,
+    rclone_path: Path,
+) -> Optional[str]:
+    """Return the cloud's latest version id when it is strictly newer than
+    anything this machine has produced or applied; None otherwise.
+
+    Safety backups are excluded from the local side so a pre-restore snapshot
+    can never lock the cloud out, and the last applied cloud version (from
+    sync_state) counts as local knowledge so the same save is not re-restored.
+    """
+    if not game.cloud_provider:
+        return None
+    remote_name = game.remote_path or config.rclone_remote_name
+    if not remote_name:
+        return None
+    try:
+        cloud_ids = list_remote_versions(rclone_path, game, remote_name, config.remote_root)
+    except RuntimeError as exc:
+        console.print(f"[dim]Cloud check failed for {game.title}: {exc}[/dim]")
+        return None
+    cloud_latest = latest_version_id(cloud_ids)
+    local_latest = db.get_latest_version_id(game.id, exclude_safety=True)
+    effective_local = effective_local_latest(local_latest, db.get_sync_state(game.id))
+    if cloud_latest is None or not should_restore_from_cloud(effective_local, cloud_latest):
+        return None
+    return cloud_latest
+
+
+def _auto_restore_if_idle(
     game: Game,
     config: SyncConfig,
     db: Database,
     rclone_path: Path,
     ludusavi_path: Path,
 ) -> None:
-    """Restore the latest cloud save on launch, only when it is newer than local."""
-    if not game.cloud_provider:
+    """Apply the latest cloud save when it is newer — ONLY for a game that is
+    not currently running (callers guarantee that; restoring under a live
+    process would race the game's own save writes).
+
+    Ordering is deliberate: download and verify FIRST, then the safety
+    backup, then apply — and the restore is aborted if the safety backup
+    fails, so local progress is never overwritten without a recoverable
+    copy. A failed step changes no state and is retried at the next idle
+    check. The applied cloud version is recorded in sync_state.
+    """
+    cloud_latest = _cloud_newer_version(game, config, db, rclone_path)
+    if cloud_latest is None:
         return
     remote_name = game.remote_path or config.rclone_remote_name
     if not remote_name:
         return
 
-    try:
-        cloud_ids = list_remote_versions(rclone_path, game, remote_name, config.remote_root)
-    except RuntimeError as exc:
-        console.print(f"[dim]Cloud check failed for {game.title}: {exc}[/dim]")
-        return
-
-    cloud_latest = latest_version_id(cloud_ids)
-    local_versions = db.get_versions(game.id)
-    local_latest = local_versions[0].id if local_versions else None
-
-    if not should_restore_from_cloud(local_latest, cloud_latest) or cloud_latest is None:
-        console.print(f"[dim]{game.title}: local save is up to date.[/dim]")
-        return
-
-    # Secure the current on-disk state so local progress is never lost.
-    console.print(f"[cyan]{game.title}: cloud has a newer save. Securing current state...[/cyan]")
-    _run_backup(game, config, db, ludusavi_path, label="Safety backup before cloud restore")
-
+    console.print(f"[cyan]{game.title}: cloud has a newer save. Downloading...[/cyan]")
     restore_dir = _cloud_restore_dir(game.id)
     _reset_dir(restore_dir)
     result = download_save(
@@ -842,6 +1169,25 @@ def _auto_restore_on_start(
     if not result.success:
         console.print(f"[red]{result.message}[/red]")
         return
+    if not any(restore_dir.rglob("mapping.yaml")):
+        console.print(
+            f"[red]{game.title}: downloaded save has no Ludusavi mapping.yaml; not restoring.[/red]"
+        )
+        return
+
+    # Download verified — secure the current on-disk state before applying.
+    # If that fails, DO NOT restore: overwriting the only copy of local
+    # progress without a recoverable backup is the one unforgivable failure.
+    safety = _run_backup(
+        game, config, db, ludusavi_path,
+        label="Safety backup before cloud restore", origin="safety",
+    )
+    if not safety.success:
+        console.print(
+            f"[red]{game.title}: safety backup failed ({safety.message}); "
+            f"cloud restore skipped.[/red]"
+        )
+        return
 
     try:
         restore_from_backup(ludusavi_path, game, restore_dir)
@@ -849,12 +1195,23 @@ def _auto_restore_on_start(
         console.print(f"[red]Restore failed for {game.title}: {exc}[/red]")
         return
 
+    db.update_sync_state(game.id, cloud_latest)
     notify("Cloud save restored", game.title)
     console.print(f"[green]Restored latest cloud save for {game.title}[/green]")
 
 
 def _slugify(text: str) -> str:
-    return "".join(c if c.isalnum() else "-" for c in text.strip().lower()).strip("-")
+    # Per-character replacement (not run-collapsing) keeps ids byte-identical
+    # to those already stored in existing games.yaml files — changing the
+    # scheme would re-add every tracked game under a new id. isalnum() keeps
+    # Unicode titles (CJK/Cyrillic) working; the hash fallback covers titles
+    # with no alphanumerics at all.
+    slug = "".join(c if c.isalnum() else "-" for c in text.strip().lower()).strip("-")
+    if not slug:
+        import hashlib
+
+        slug = "game-" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+    return slug
 
 
 def _human_size(size_bytes: int) -> str:
@@ -866,7 +1223,3 @@ def _human_size(size_bytes: int) -> str:
         if size < 1024.0:
             return f"{size:.2f} {unit}"
     return f"{size:.2f} TiB"
-
-
-def run() -> None:
-    app()
