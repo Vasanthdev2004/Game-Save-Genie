@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "game-save-genie"
-version = "0.3.0"
+version = "0.4.0"
 description = "Self-hosted cloud save sync for the games that don't have it - auto-backup, versioning, and cross-machine restore built on Ludusavi + rclone"
 readme = "README.md"
 license = {text = "MIT"}

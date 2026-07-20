@@ -40,6 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_versions_created_at ON save_versions(created_at);
 _MIGRATION_COLUMNS = {
     "sha256": "sha256 TEXT",
     "origin": "origin TEXT NOT NULL DEFAULT 'user'",
+    "content_digest": "content_digest TEXT",
 }
 
 
@@ -74,8 +75,9 @@ class Database:
                 """
                 INSERT INTO save_versions
                 (id, game_id, created_at, local_path, size_bytes, file_count, label,
-                 source_machine, platform, cloud_synced, cloud_remote_path, sha256, origin)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 source_machine, platform, cloud_synced, cloud_remote_path, sha256, origin,
+                 content_digest)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     version.id,
@@ -91,6 +93,7 @@ class Database:
                     version.cloud_remote_path,
                     version.sha256,
                     version.origin,
+                    version.content_digest,
                 ),
             )
             conn.commit()
@@ -188,4 +191,5 @@ class Database:
             cloud_remote_path=row["cloud_remote_path"],
             sha256=row["sha256"],
             origin=row["origin"] or "user",
+            content_digest=row["content_digest"],
         )
