@@ -24,8 +24,21 @@ jobs:
           packaging/gsg_entry.py
       - name: Smoke test
         run: dist\gsg.exe --version
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\installer.iss /DMyAppVersion=$version
+          if (-not (Test-Path "dist\GameSaveGenie-Setup.exe")) { throw "installer not produced" }
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/gsg.exe
+          files: |
+            dist/gsg.exe
+            dist/GameSaveGenie-Setup.exe
           generate_release_notes: true

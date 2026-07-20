@@ -1,0 +1,47 @@
+name: Installer check
+
+on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/installer-check.yml"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-install:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build gsg.exe
+        run: |
+          pip install . pyinstaller
+          pyinstaller --onefile --console --clean --name gsg --distpath dist --workpath build --specpath build packaging/gsg_entry.py
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\installer.iss /DMyAppVersion=0.0.0
+          if (-not (Test-Path "dist\GameSaveGenie-Setup.exe")) { throw "installer not produced" }
+      - name: Silent install + smoke test
+        shell: pwsh
+        run: |
+          Start-Process -Wait -FilePath "dist\GameSaveGenie-Setup.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART"
+          $exe = "$env:LOCALAPPDATA\Programs\Game Save Genie\gsg.exe"
+          if (-not (Test-Path $exe)) { throw "gsg.exe not installed" }
+          & $exe --version
+          $path = (Get-ItemProperty -Path "HKCU:\Environment" -Name Path).Path
+          if ($path -notlike "*Game Save Genie*") { throw "install dir not added to user PATH" }
+      - name: Silent uninstall + verify cleanup
+        shell: pwsh
+        run: |
+          $uninst = "$env:LOCALAPPDATA\Programs\Game Save Genie\unins000.exe"
+          Start-Process -Wait -FilePath $uninst -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART"
+          if (Test-Path "$env:LOCALAPPDATA\Programs\Game Save Genie\gsg.exe") { throw "gsg.exe still present after uninstall" }
