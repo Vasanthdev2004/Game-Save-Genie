@@ -823,6 +823,21 @@ def auto(
 
     setup_file_logging(get_data_dir() / "logs")
 
+    # Take the single-instance lock BEFORE the (expensive) scan: a second
+    # instance should be rejected immediately, not after a full disk scan.
+    # In service context (--no-wizard) a held lock is a benign outcome —
+    # another watcher is doing the job — so exit 0, or Restart=on-failure
+    # would relaunch the service every 30 seconds forever.
+    lock = _acquire_instance_lock()
+    if lock is None:
+        message = "Another gsg watcher is already running."
+        if no_wizard:
+            logging.getLogger(__name__).info(message)
+            console.print(f"[dim]{message}[/dim]")
+            raise typer.Exit(0)
+        console.print(f"[red]{message}[/red]")
+        raise typer.Exit(1)
+
     # Scan for non-launcher (Hydra/manual) games
     from .launcher import detect_launcher, get_all_launcher_games
 
@@ -870,12 +885,17 @@ def auto(
     # Load all tracked games for watching
     all_tracked = _watchable_games(load_games(config_path))
     if not all_tracked:
-        console.print("[yellow]No games to watch. Play some games and run 'gsg auto' again.[/yellow]")
-        raise typer.Exit(1)
-
-    lock = _acquire_instance_lock()
-    if lock is None:
-        console.print("[red]Another gsg watcher is already running.[/red]")
+        message = "No games to watch. Play some games and run 'gsg auto' again."
+        if no_wizard:
+            # Benign in service context (fresh machine, nothing installed
+            # yet): exit clean so systemd does not crash-loop; the next
+            # login rescans.
+            logging.getLogger(__name__).info(message)
+            console.print(f"[dim]{message}[/dim]")
+            lock.close()
+            raise typer.Exit(0)
+        console.print(f"[yellow]{message}[/yellow]")
+        lock.close()
         raise typer.Exit(1)
 
     db = Database(get_data_dir() / "versions.db")
@@ -965,9 +985,10 @@ def _startup_vbs_path() -> Path:
 def _find_gsg_exe() -> Optional[Path]:
     """Locate the gsg executable for autostart, or None."""
     if getattr(sys, "frozen", False):
-        # Running as a PyInstaller bundle: this process IS gsg.exe.
+        # Running as a PyInstaller bundle: this process IS the gsg binary.
         return Path(sys.executable)
-    candidate = Path(sys.executable).parent / "gsg.exe"
+    binary = "gsg.exe" if os.name == "nt" else "gsg"
+    candidate = Path(sys.executable).parent / binary
     if candidate.exists():
         return candidate
     import shutil
@@ -975,7 +996,8 @@ def _find_gsg_exe() -> Optional[Path]:
     which = shutil.which("gsg")
     if which:
         return Path(which)
-    project_venv = Path(__file__).resolve().parents[2] / ".venv" / "Scripts" / "gsg.exe"
+    scripts_dir = "Scripts" if os.name == "nt" else "bin"
+    project_venv = Path(__file__).resolve().parents[2] / ".venv" / scripts_dir / binary
     if project_venv.exists():
         return project_venv
     return None
@@ -992,16 +1014,19 @@ def _install_startup(config_path: Optional[Path] = None) -> None:
     checks the executable still exists so a moved exe fails silently rather
     than popping an error dialog at every logon.
     """
-    if os.name != "nt":
-        console.print("[yellow]Autostart install is currently Windows-only.[/yellow]")
-        raise typer.Exit(1)
-
     gsg_path = _find_gsg_exe()
     if gsg_path is None:
         console.print(
             "[red]Could not locate the gsg executable; autostart not installed. "
             "Install the package (pip install .) or use the standalone gsg.exe.[/red]"
         )
+        raise typer.Exit(1)
+
+    if sys.platform.startswith("linux"):
+        _install_systemd_unit(gsg_path, config_path)
+        return
+    if os.name != "nt":
+        console.print("[yellow]Autostart install is not yet supported on this OS.[/yellow]")
         raise typer.Exit(1)
 
     temp_dir = os.environ.get("TEMP", "")
@@ -1037,12 +1062,114 @@ def _install_startup(config_path: Optional[Path] = None) -> None:
 
 
 def _uninstall_startup() -> None:
-    """Remove gsg auto from Windows startup."""
+    """Remove gsg auto from startup (Windows VBS or Linux systemd unit)."""
+    if os.name != "nt":
+        _uninstall_systemd_unit()
+        return
     vbs_path = _startup_vbs_path()
     if vbs_path.exists():
         vbs_path.unlink()
         console.print(f"[green]Removed from Windows startup: {vbs_path}[/green]")
     else:
+        console.print("[yellow]No autostart entry found.[/yellow]")
+
+
+_SYSTEMD_UNIT_NAME = "game-save-genie.service"
+
+
+def _systemd_unit_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / _SYSTEMD_UNIT_NAME
+
+
+def _systemd_escape(path: Path) -> str:
+    """Quote a path for a systemd ExecStart token (spaces + % specifiers)."""
+    return '"' + path.as_posix().replace("%", "%%") + '"'
+
+
+def _systemd_unit_content(gsg_path: Path, config_path: Optional[Path]) -> str:
+    """The systemd user unit that runs the watcher at login (pure, testable).
+
+    Benign outcomes (lock already held, nothing to watch yet) exit 0 so
+    Restart=on-failure does not loop on them; the StartLimit settings bound
+    retries for genuine failures — without them, RestartSec=30 spaces starts
+    so far apart that systemd's default rate limiter never trips.
+    """
+    command = _systemd_escape(gsg_path)
+    if config_path is not None:
+        command += f" --config {_systemd_escape(config_path)}"
+    command += " auto --no-wizard"
+    return (
+        "[Unit]\n"
+        "Description=Game Save Genie automatic save backup\n"
+        "StartLimitIntervalSec=600\n"
+        "StartLimitBurst=5\n"
+        "\n"
+        "[Service]\n"
+        f"ExecStart={command}\n"
+        "Restart=on-failure\n"
+        "RestartSec=30\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def _install_systemd_unit(gsg_path: Path, config_path: Optional[Path]) -> None:
+    """Install and start the watcher as a systemd user service (Linux)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("systemctl") is None:
+        console.print(
+            "[yellow]systemctl not found — autostart install currently supports "
+            "systemd. Run 'gsg auto' from your session startup instead.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    unit_path = _systemd_unit_path()
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(_systemd_unit_content(gsg_path, config_path), encoding="utf-8")
+
+    for args in (
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", _SYSTEMD_UNIT_NAME],
+    ):
+        result = subprocess.run(args, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            console.print(
+                f"[red]{' '.join(args)} failed: "
+                f"{(result.stderr or result.stdout or '').strip()}[/red]"
+            )
+            raise typer.Exit(1)
+    console.print(f"[green]Installed systemd user service: {unit_path}[/green]")
+    console.print(
+        "[dim]Starts at login. To run without an active session (headless), "
+        "enable lingering: loginctl enable-linger $USER[/dim]"
+    )
+
+
+def _uninstall_systemd_unit() -> None:
+    import shutil
+    import subprocess
+
+    have_systemctl = shutil.which("systemctl") is not None
+    unit_path = _systemd_unit_path()
+    removed = False
+    if have_systemctl:
+        subprocess.run(
+            ["systemctl", "--user", "disable", "--now", _SYSTEMD_UNIT_NAME],
+            capture_output=True, text=True, check=False,
+        )
+    if unit_path.exists():
+        unit_path.unlink()
+        if have_systemctl:
+            subprocess.run(
+                ["systemctl", "--user", "daemon-reload"],
+                capture_output=True, text=True, check=False,
+            )
+        console.print(f"[green]Removed systemd user service: {unit_path}[/green]")
+        removed = True
+    if not removed:
         console.print("[yellow]No autostart entry found.[/yellow]")
 
 
@@ -1354,13 +1481,14 @@ def _run_setup_wizard(ctx: typer.Context) -> bool:
         console.print("[dim]Skipped cloud setup. Run 'gsg' again any time.[/dim]")
         return False
 
-    if ok and os.name == "nt" and typer.confirm(
+    can_autostart = os.name == "nt" or sys.platform.startswith("linux")
+    if ok and can_autostart and typer.confirm(
         "Start Game Save Genie automatically at boot?", default=True
     ):
         try:
             _install_startup(ctx.obj.get("config_path"))
         except typer.Exit:
-            pass  # could not locate gsg.exe; the message was already printed
+            pass  # install failed; the specific message was already printed
     return ok
 
 

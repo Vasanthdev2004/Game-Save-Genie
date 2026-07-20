@@ -117,7 +117,7 @@ Cloud layout: `<remote>:<remote_root>/<game-id>/<version-id>.zip` — one compre
 
 **What if I stop using it?** Your saves are still sitting in your Drive/bucket as ordinary zips, and Ludusavi can restore its own backup format directly. No lock-in, nothing expires.
 
-**Linux / Steam Deck?** Backup, restore, and `pull` have Linux code paths (including Wine-prefix handling) but need real-world testing; the watcher and autostart are Windows-only today. If you run Linux, [issues](https://github.com/Vasanthdev2004/Game-Save-Genie/issues) with reports are gold — see [CONTRIBUTING](CONTRIBUTING.md).
+**Linux / Steam Deck?** Beta, and testers are gold. The full pipeline runs on Linux: backup/restore/`pull` (with Wine-prefix handling), the process watcher, `notify-send` notifications, Steam detection (native/Deck/Flatpak paths), and `gsg auto --install` sets up a systemd user service (headless boxes: `loginctl enable-linger $USER`). What it needs now is real-world mileage — [file an issue](https://github.com/Vasanthdev2004/Game-Save-Genie/issues) with anything you hit; see [CONTRIBUTING](CONTRIBUTING.md).
 
 **Emulator saves? Games Ludusavi doesn't know?** Planned: `gsg add --path` for arbitrary directories with a RetroArch preset. Watch the repo.
 
