@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 — 2026-07-20
+
+### Added
+- **Windows installer** — `GameSaveGenie-Setup.exe` attached to every release: per-user install (no admin), adds `gsg` to your PATH, Start Menu entry, and offers to run first-time setup. Cleanly removes itself (including the PATH entry) on uninstall.
+- **Linux support (beta)** — the full pipeline runs on Linux: `gsg auto --install` sets up a systemd user service, notifications via `notify-send`, and Steam detection across native/Steam Deck/Flatpak paths (so Steam games aren't double-backed-up). Backup/restore/`pull` already worked cross-platform.
+- **winget tooling** — a generator for the winget manifests, so `winget install` can follow after a release.
+
+### Fixed
+- systemd autostart hardening from review: benign service outcomes (another watcher already running, no games yet) exit cleanly so the service never crash-loops; `ExecStart` is quoted for install paths containing spaces; retries are bounded.
+
 ## 0.4.0 — 2026-07-20
 
 ### Added
