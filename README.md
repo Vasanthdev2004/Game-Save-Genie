@@ -32,7 +32,8 @@ Steam/Epic/Xbox games are detected and skipped automatically — those launchers
 
 ## Get started in 30 seconds
 
-**Standalone (no Python):** grab `gsg.exe` from [Releases](https://github.com/Vasanthdev2004/Game-Save-Genie/releases).
+**Windows installer (recommended):** grab `GameSaveGenie-Setup.exe` from [Releases](https://github.com/Vasanthdev2004/Game-Save-Genie/releases) — per-user, no admin needed, adds `gsg` to your terminal, offers to run setup when done.
+**Portable:** `gsg.exe` from the same Releases page — no install at all.
 **From source** (Python 3.10+): `pip install git+https://github.com/Vasanthdev2004/Game-Save-Genie`
 
 Then:
