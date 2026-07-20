@@ -45,3 +45,5 @@ jobs:
           $uninst = "$env:LOCALAPPDATA\Programs\Game Save Genie\unins000.exe"
           Start-Process -Wait -FilePath $uninst -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART"
           if (Test-Path "$env:LOCALAPPDATA\Programs\Game Save Genie\gsg.exe") { throw "gsg.exe still present after uninstall" }
+          $path = (Get-ItemProperty -Path "HKCU:\Environment" -Name Path -ErrorAction SilentlyContinue).Path
+          if ($path -like "*Game Save Genie*") { throw "install dir left in user PATH after uninstall" }
