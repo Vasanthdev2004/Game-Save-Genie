@@ -1087,6 +1087,35 @@ def setup_railway(
     region: str = typer.Option("auto", help="Region"),
 ) -> None:
     """Configure rclone for Railway S3-compatible storage."""
+    _setup_s3_endpoint(ctx, remote_name, endpoint, access_key, secret_key, bucket, region)
+
+
+@app.command(name="setup-s3")
+def setup_s3(
+    ctx: typer.Context,
+    remote_name: str = typer.Argument(default="s3", help="Name for the rclone remote"),
+    endpoint: str = typer.Option(..., prompt=True, help="S3 endpoint URL (e.g. http://homelab:9000)"),
+    access_key: str = typer.Option(..., prompt=True, hide_input=True, help="Access key"),
+    secret_key: str = typer.Option(..., prompt=True, hide_input=True, help="Secret key"),
+    bucket: str = typer.Option(..., prompt=True, help="Bucket name"),
+    region: str = typer.Option("auto", help="Region"),
+) -> None:
+    """Connect any S3-compatible storage: self-hosted MinIO, Garage, Backblaze B2, AWS...
+
+    See docker/README.md for running your own save server with docker compose.
+    """
+    _setup_s3_endpoint(ctx, remote_name, endpoint, access_key, secret_key, bucket, region)
+
+
+def _setup_s3_endpoint(
+    ctx: typer.Context,
+    remote_name: str,
+    endpoint: str,
+    access_key: str,
+    secret_key: str,
+    bucket: str,
+    region: str,
+) -> None:
     config_path = ctx.obj.get("config_path") or get_config_path()
     conf = _configure_railway(
         config_path, remote_name, endpoint, access_key, secret_key, bucket, region

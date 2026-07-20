@@ -42,6 +42,8 @@ gsg
 
 That's the whole setup. A wizard finds your games, connects your cloud (Google Drive/OneDrive open a browser — sign in, click Allow, done), and offers start-at-boot. From then on `gsg auto` protects everything, hands-free. Ludusavi and rclone are downloaded automatically on first use.
 
+**Homelab?** Run your own save server with one `docker compose up` and connect it with `gsg setup-s3` — see [docker/README.md](docker/README.md). Works with any S3-compatible store (MinIO, Garage, TrueNAS…), supports per-friend accounts, and your saves never leave your network.
+
 ## How it compares
 
 |  | Game Save Genie | Ludusavi | Game Backup Monitor | Hydra Cloud | Syncthing DIY |
