@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -42,6 +43,20 @@ def notify(title: str, message: str) -> None:
     logger.info("%s: %s", title, message)
     if os.name == "nt":
         _windows_toast(title, message)
+    elif sys.platform.startswith("linux"):
+        _linux_notify(title, message)
+
+
+def _linux_notify(title: str, message: str) -> None:
+    """Desktop notification via notify-send; silently absent on headless boxes."""
+    try:
+        subprocess.Popen(
+            ["notify-send", "--app-name", "Game Save Genie", title, message],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, ValueError) as exc:
+        logger.debug("notify-send failed: %s", exc)
 
 
 def _windows_toast(title: str, message: str) -> None:

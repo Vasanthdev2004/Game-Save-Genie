@@ -51,6 +51,9 @@ def _find_steam_path() -> Path | None:
     """Find the Steam installation directory."""
     # sys.platform (not os.name) so mypy skips the winreg block on non-Windows.
     if sys.platform != "win32":
+        for candidate in _linux_steam_candidates(Path.home()):
+            if candidate.exists():
+                return candidate
         return None
 
     try:
@@ -72,6 +75,19 @@ def _find_steam_path() -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _linux_steam_candidates(home: Path) -> list[Path]:
+    """Steam install locations on Linux/Steam Deck (native, symlink, Flatpak).
+
+    Matters most on the Deck: without Steam detection every Steam game would
+    be classified 'other' and auto-added for backup, duplicating Steam Cloud.
+    """
+    return [
+        home / ".local" / "share" / "Steam",
+        home / ".steam" / "steam",
+        home / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam",
+    ]
 
 
 def get_epic_games() -> set[str]:

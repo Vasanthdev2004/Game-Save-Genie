@@ -965,9 +965,10 @@ def _startup_vbs_path() -> Path:
 def _find_gsg_exe() -> Optional[Path]:
     """Locate the gsg executable for autostart, or None."""
     if getattr(sys, "frozen", False):
-        # Running as a PyInstaller bundle: this process IS gsg.exe.
+        # Running as a PyInstaller bundle: this process IS the gsg binary.
         return Path(sys.executable)
-    candidate = Path(sys.executable).parent / "gsg.exe"
+    binary = "gsg.exe" if os.name == "nt" else "gsg"
+    candidate = Path(sys.executable).parent / binary
     if candidate.exists():
         return candidate
     import shutil
@@ -975,7 +976,8 @@ def _find_gsg_exe() -> Optional[Path]:
     which = shutil.which("gsg")
     if which:
         return Path(which)
-    project_venv = Path(__file__).resolve().parents[2] / ".venv" / "Scripts" / "gsg.exe"
+    scripts_dir = "Scripts" if os.name == "nt" else "bin"
+    project_venv = Path(__file__).resolve().parents[2] / ".venv" / scripts_dir / binary
     if project_venv.exists():
         return project_venv
     return None
@@ -992,10 +994,6 @@ def _install_startup(config_path: Optional[Path] = None) -> None:
     checks the executable still exists so a moved exe fails silently rather
     than popping an error dialog at every logon.
     """
-    if os.name != "nt":
-        console.print("[yellow]Autostart install is currently Windows-only.[/yellow]")
-        raise typer.Exit(1)
-
     gsg_path = _find_gsg_exe()
     if gsg_path is None:
         console.print(
@@ -1003,6 +1001,10 @@ def _install_startup(config_path: Optional[Path] = None) -> None:
             "Install the package (pip install .) or use the standalone gsg.exe.[/red]"
         )
         raise typer.Exit(1)
+
+    if os.name != "nt":
+        _install_systemd_unit(gsg_path, config_path)
+        return
 
     temp_dir = os.environ.get("TEMP", "")
     if temp_dir and str(gsg_path).lower().startswith(temp_dir.lower()):
@@ -1037,12 +1039,98 @@ def _install_startup(config_path: Optional[Path] = None) -> None:
 
 
 def _uninstall_startup() -> None:
-    """Remove gsg auto from Windows startup."""
+    """Remove gsg auto from startup (Windows VBS or Linux systemd unit)."""
+    if os.name != "nt":
+        _uninstall_systemd_unit()
+        return
     vbs_path = _startup_vbs_path()
     if vbs_path.exists():
         vbs_path.unlink()
         console.print(f"[green]Removed from Windows startup: {vbs_path}[/green]")
     else:
+        console.print("[yellow]No autostart entry found.[/yellow]")
+
+
+_SYSTEMD_UNIT_NAME = "game-save-genie.service"
+
+
+def _systemd_unit_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / _SYSTEMD_UNIT_NAME
+
+
+def _systemd_unit_content(gsg_path: Path, config_path: Optional[Path]) -> str:
+    """The systemd user unit that runs the watcher at login (pure, testable)."""
+    command = gsg_path.as_posix()
+    if config_path is not None:
+        command += f' --config "{config_path.as_posix()}"'
+    command += " auto --no-wizard"
+    return (
+        "[Unit]\n"
+        "Description=Game Save Genie automatic save backup\n"
+        "After=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        f"ExecStart={command}\n"
+        "Restart=on-failure\n"
+        "RestartSec=30\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def _install_systemd_unit(gsg_path: Path, config_path: Optional[Path]) -> None:
+    """Install and start the watcher as a systemd user service (Linux)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("systemctl") is None:
+        console.print(
+            "[yellow]systemctl not found — autostart install currently supports "
+            "systemd. Run 'gsg auto' from your session startup instead.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    unit_path = _systemd_unit_path()
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(_systemd_unit_content(gsg_path, config_path), encoding="utf-8")
+
+    for args in (
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", _SYSTEMD_UNIT_NAME],
+    ):
+        result = subprocess.run(args, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            console.print(
+                f"[red]{' '.join(args)} failed: "
+                f"{(result.stderr or result.stdout or '').strip()}[/red]"
+            )
+            raise typer.Exit(1)
+    console.print(f"[green]Installed systemd user service: {unit_path}[/green]")
+    console.print(
+        "[dim]Starts at login. To run without an active session (headless), "
+        "enable lingering: loginctl enable-linger $USER[/dim]"
+    )
+
+
+def _uninstall_systemd_unit() -> None:
+    import subprocess
+
+    unit_path = _systemd_unit_path()
+    removed = False
+    subprocess.run(
+        ["systemctl", "--user", "disable", "--now", _SYSTEMD_UNIT_NAME],
+        capture_output=True, text=True, check=False,
+    )
+    if unit_path.exists():
+        unit_path.unlink()
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            capture_output=True, text=True, check=False,
+        )
+        console.print(f"[green]Removed systemd user service: {unit_path}[/green]")
+        removed = True
+    if not removed:
         console.print("[yellow]No autostart entry found.[/yellow]")
 
 
@@ -1354,7 +1442,7 @@ def _run_setup_wizard(ctx: typer.Context) -> bool:
         console.print("[dim]Skipped cloud setup. Run 'gsg' again any time.[/dim]")
         return False
 
-    if ok and os.name == "nt" and typer.confirm(
+    if ok and typer.confirm(
         "Start Game Save Genie automatically at boot?", default=True
     ):
         try:
