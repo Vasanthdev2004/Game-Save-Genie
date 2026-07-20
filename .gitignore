@@ -34,3 +34,7 @@ backups/
 node_modules/
 package.json
 package-lock.json
+
+# Claude Code local settings (personal, not for the repo)
+.claude/settings.local.json
+.claude/worktrees/
