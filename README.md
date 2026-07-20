@@ -46,19 +46,22 @@ That's the whole setup. A wizard finds your games, connects your cloud (Google D
 
 **Homelab?** Run your own save server with one `docker compose up` and connect it with `gsg setup-s3` — see [docker/README.md](docker/README.md). Works with any S3-compatible store (MinIO, Garage, TrueNAS…), supports per-friend accounts, and your saves never leave your network.
 
+> **Status:** single-machine backup on Windows is stable and used daily. Cross-machine sync (`gsg pull`) and Linux/Steam Deck support are **beta** — solid in testing, but not yet battle-tested across many real setups. Keep a second copy of anything precious for now, and please [file an issue](https://github.com/Vasanthdev2004/Game-Save-Genie/issues) with anything you hit — that feedback is what moves it out of beta.
+
 ## How it compares
 
 |  | Game Save Genie | Ludusavi | Game Backup Monitor | Hydra Cloud | Syncthing DIY |
 |---|:-:|:-:|:-:|:-:|:-:|
 | Auto-backup on game close | ✅ | ❌ | ✅ | ✅ | ➖ folder sync only |
 | Periodic backup during play | ✅ | ❌ | ✅ | ❌ | ➖ |
-| Automatic cloud restore | ✅ | ❌ manual | ❌ | ❌ | ➖ no game awareness |
+| Automatic cloud restore | ✅ | ❌ manual | ⚠️ via a sync folder | ❌ | ➖ no game awareness |
+| Native cloud (direct, delta uploads) | ✅ | ✅ | ❌ needs Dropbox etc. | ✅ their servers | ➖ folder sync |
 | Cross-machine path remapping | ✅ | ❌ | ❌ | ✅ | ❌ |
 | Version history | ✅ per session | ✅ | ✅ | ⚠️ 2 per game | ❌ conflict files |
 | Storage you own | ✅ | ✅ | ⚠️ sync folder | ❌ their servers | ✅ |
 | Free | ✅ | ✅ | ✅ | ❌ subscription* | ✅ |
 
-<sub>*Hydra Cloud saves are deleted 7 days after a subscription ends. Comparison reflects mid-2026; check each project for current features. Ludusavi is a fantastic backup engine — Game Save Genie builds on it and adds the automation layer.</sub>
+<sub>*Hydra Cloud is subscription-only, caps each backup at 500 MB and 2 versions per game, and deletes saves 7 days after a subscription ends. Game Backup Monitor is a solid tool that also auto-backs-up and auto-restores — its difference from Game Save Genie is cloud: "cloud" in GBM means pointing its backups at a separate folder-sync client (e.g. Dropbox), whereas Game Save Genie uploads directly to your own cloud/S3/self-hosted server with delta transfers, unlimited versions, and cross-machine path remapping. Comparison reflects mid-2026; check each project for current features. Ludusavi is a fantastic backup engine — Game Save Genie builds on it and adds the automation layer.</sub>
 
 ## Everyday commands
 
