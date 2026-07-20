@@ -36,6 +36,7 @@ from .config import (
     save_config,
     save_games,
 )
+from . import custom
 from .database import Database
 from .ludusavi import (
     backup_game,
@@ -48,6 +49,7 @@ from .models import (
     BackupResult,
     CloudProvider,
     Game,
+    GameSavePath,
     Platform,
     ProcessInfo,
     SaveVersion,
@@ -201,12 +203,22 @@ def add(
     ctx: typer.Context,
     title: str = typer.Argument(..., help="Game title"),
     executable: Optional[str] = typer.Option(None, "--exe", help="Executable name to watch"),
+    paths: list[Path] = typer.Option(
+        [], "--path",
+        help="Save folder or file to back up directly, bypassing Ludusavi "
+        "(repeatable; for emulators / games Ludusavi doesn't know)",
+    ),
     platform: Platform = typer.Option(_current_platform(), "--platform", help="Platform"),
     cloud: Optional[CloudProvider] = typer.Option(None, "--cloud", help="Cloud provider"),
     remote_path: Optional[str] = typer.Option(None, "--remote", help="Remote path/remote name"),
     no_auto_sync: bool = typer.Option(False, "--no-auto-sync", help="Disable auto-sync"),
 ) -> None:
-    """Add a game to track."""
+    """Add a game to track.
+
+    With one or more --path options the game is backed up by copying those
+    exact locations (custom mode), instead of relying on Ludusavi's save
+    database — the way to protect emulator saves and anything Ludusavi misses.
+    """
     config_path = ctx.obj.get("config_path")
     games = load_games(config_path)
     game_id = _slugify(title)
@@ -214,18 +226,30 @@ def add(
         console.print(f"[yellow]Game '{title}' is already tracked.[/yellow]")
         raise typer.Exit(1)
 
+    # Resolve to absolute at add time so the stored location is unambiguous
+    # regardless of the working directory a later backup/watcher runs from.
+    save_paths = [GameSavePath(path=p.expanduser().resolve()) for p in paths]
+    for sp in save_paths:
+        if not sp.path.exists():
+            console.print(
+                f"[yellow]Note: {sp.path} does not exist yet — backups will find "
+                f"nothing there until it does.[/yellow]"
+            )
     game = Game(
         id=game_id,
         title=title,
         platform=platform,
         executable_names=[executable] if executable else [],
+        save_paths=save_paths,
+        custom=bool(save_paths),
         auto_sync=not no_auto_sync,
         cloud_provider=cloud,
         remote_path=remote_path,
     )
     games.append(game)
     save_games(games, config_path)
-    console.print(f"[green]Added game: {title} ({game_id})[/green]")
+    mode = f"custom, {len(save_paths)} path(s)" if save_paths else "Ludusavi"
+    console.print(f"[green]Added game: {title} ({game_id}) — {mode}[/green]")
 
 
 @app.command(name="list")
@@ -375,20 +399,37 @@ def backup(
     config = load_config(config_path)
     games = load_games(config_path)
     db = Database(get_data_dir() / "versions.db")
-    ludusavi_path = get_ludusavi_path(config_path)
 
     targets = [g for g in games if g.id == game_id] if game_id else games
     if game_id and not targets:
         console.print(f"[red]Game not found: {game_id}[/red]")
         raise typer.Exit(1)
 
+    # Resolve Ludusavi only if a non-custom game needs it (custom-only users
+    # shouldn't trigger a Ludusavi download).
+    _lud: dict[str, Path] = {}
+
+    def ludusavi() -> Path:
+        if "path" not in _lud:
+            _lud["path"] = get_ludusavi_path(config_path)
+        return _lud["path"]
+
     for game in targets:
         if dry_run:
-            preview = preview_backup(ludusavi_path, game, config.backup_dir)
-            console.print(f"{'[cyan]' if preview.success else '[red]'}{game.title}: {preview.message}[/]")
+            if game.custom:
+                message = _custom_preview_message(game, db)
+            else:
+                message = preview_backup(ludusavi(), game, config.backup_dir).message
+            console.print(f"[cyan]{game.title}: {message}[/cyan]")
             continue
-        result = _run_backup(game, config, db, ludusavi_path, label)
-        console.print(f"{'[green]' if result.success else '[red]'}{result.message}[/]")
+        result = _run_backup(game, config, db, None if game.custom else ludusavi(), label)
+        if not result.success:
+            color = "red"
+        elif result.version is None:
+            color = "dim"  # succeeded but nothing to back up (no changes / no files)
+        else:
+            color = "green"
+        console.print(f"[{color}]{result.message}[/]")
         if result.success and result.version and not no_cloud and game.cloud_provider:
             _cloud_upload(ctx, game, result.version, dry_run=False)
 
@@ -426,8 +467,8 @@ def restore(
         console.print(f"[cyan]Would restore version {version.id} for {game.title}[/cyan]")
         return
 
-    ludusavi_path = get_ludusavi_path(config_path)
     config = load_config(config_path)
+    ludusavi_path = None if game.custom else get_ludusavi_path(config_path)
 
     # Verify and stage the snapshot BEFORE touching anything on disk.
     restore_source = _materialize_version(version, game)
@@ -449,11 +490,33 @@ def restore(
             raise typer.Exit(1)
 
     try:
-        restore_from_backup(ludusavi_path, game, restore_source)
+        _apply_staged_backup(game, restore_source, ludusavi_path)
     except RuntimeError as exc:
         console.print(f"[red]Restore failed: {exc}[/red]")
         raise typer.Exit(1) from exc
     console.print(f"[green]Restored {game.title} from version {version.id}[/green]")
+
+
+def _apply_staged_backup(
+    game: Game, staged_dir: Path, ludusavi_path: Optional[Path]
+) -> None:
+    """Apply a staged backup tree to disk, dispatching by game type.
+
+    Raises RuntimeError on failure so callers can abort without side effects.
+    """
+    if game.custom:
+        custom.restore_custom(game, staged_dir)
+    else:
+        if ludusavi_path is None:
+            raise RuntimeError("Ludusavi path was not resolved for a non-custom restore")
+        restore_from_backup(ludusavi_path, game, staged_dir)
+
+
+def _staged_backup_has_content(game: Game, staged_dir: Path) -> bool:
+    """Whether a downloaded/staged dir holds a restorable backup for this game."""
+    if game.custom:
+        return custom.custom_backup_valid(staged_dir)
+    return any(staged_dir.rglob("mapping.yaml"))
 
 
 @app.command()
@@ -574,7 +637,12 @@ def pull(
         raise typer.Exit(1)
 
     rclone_path = get_rclone_path(config_path)
-    ludusavi_path = get_ludusavi_path(config_path)
+    # Only resolve (and maybe download) Ludusavi if a non-custom game needs it.
+    ludusavi_path = (
+        get_ludusavi_path(config_path)
+        if any(not g.custom for g in cloud_targets)
+        else None
+    )
 
     # Never restore underneath a live process.
     probe = GameWatcher(cloud_targets)
@@ -673,7 +741,11 @@ def watch(ctx: typer.Context) -> None:
         raise typer.Exit(1)
 
     db = Database(get_data_dir() / "versions.db")
-    ludusavi_path = get_ludusavi_path(config_path)
+    ludusavi_path = (
+        get_ludusavi_path(config_path)
+        if any(not g.custom for g in games)
+        else None
+    )
 
     def on_close(game: Game, proc_info: object) -> None:
         console.print(f"[cyan]Game closed: {game.title}. Backing up...[/cyan]")
@@ -1402,16 +1474,34 @@ def _snapshot_version(version: SaveVersion, config: SyncConfig) -> None:
 _MAX_SAFETY_VERSIONS = 3
 
 
+def _custom_preview_message(game: Game, db: Database) -> str:
+    previous = db.get_versions(game.id)
+    prev_digest = previous[0].content_digest if previous else None
+    digest, size, count = custom.compute_source_digest(game)
+    if count == 0:
+        return "No save files found at the configured paths"
+    if digest == prev_digest:
+        return "No changes to back up"
+    return f"Would back up {count} file(s) ({_human_size(size)})"
+
+
 def _run_backup(
     game: Game,
     config: SyncConfig,
     db: Database,
-    ludusavi_path: Path,
+    ludusavi_path: Optional[Path],
     label: Optional[str] = None,
     origin: str = "user",
     protect_id: Optional[str] = None,
 ) -> BackupResult:
-    result = backup_game(ludusavi_path, game, config.backup_dir, label)
+    if game.custom:
+        previous = db.get_versions(game.id)
+        prev_digest = previous[0].content_digest if previous else None
+        result = custom.backup_custom(game, config.backup_dir, label, prev_digest)
+    else:
+        if ludusavi_path is None:
+            raise RuntimeError("Ludusavi path was not resolved for a non-custom backup")
+        result = backup_game(ludusavi_path, game, config.backup_dir, label)
     if result.success and result.version:
         try:
             _snapshot_version(result.version, config)
@@ -1599,7 +1689,7 @@ def _auto_restore_if_idle(
     config: SyncConfig,
     db: Database,
     rclone_path: Path,
-    ludusavi_path: Path,
+    ludusavi_path: Optional[Path],
 ) -> None:
     """Apply the latest cloud save when it is newer — ONLY for a game that is
     not currently running (callers guarantee that; restoring under a live
@@ -1617,7 +1707,7 @@ def _apply_cloud_version(
     config: SyncConfig,
     db: Database,
     rclone_path: Path,
-    ludusavi_path: Path,
+    ludusavi_path: Optional[Path],
     version_id: str,
 ) -> bool:
     """Download, verify, remap, and restore one cloud version.
@@ -1641,28 +1731,30 @@ def _apply_cloud_version(
     if not result.success:
         console.print(f"[red]{result.message}[/red]")
         return False
-    mapping_files = list(restore_dir.rglob("mapping.yaml"))
-    if not mapping_files:
+    if not _staged_backup_has_content(game, restore_dir):
         console.print(
-            f"[red]{game.title}: downloaded save has no Ludusavi mapping.yaml; not restoring.[/red]"
+            f"[red]{game.title}: downloaded save is not a recognizable backup; not restoring.[/red]"
         )
         return False
 
-    # Cross-machine: a backup made under another Windows username records
-    # that user's profile paths — rewrite them (and the mirrored files) for
-    # this machine before Ludusavi applies them.
-    try:
-        remapped = sum(
-            apply_remap_to_staged_backup(mp.parent) for mp in mapping_files
-        )
-    except (OSError, RuntimeError, yaml.YAMLError) as exc:
-        console.print(
-            f"[red]{game.title}: could not remap save paths for this machine "
-            f"({exc}); not restoring.[/red]"
-        )
-        return False
-    if remapped:
-        console.print(f"[dim]Remapped {remapped} save path(s) for this machine.[/dim]")
+    # Cross-machine remap of Ludusavi backups: a backup made under another
+    # Windows username records that user's profile paths — rewrite them (and
+    # the mirrored files) for this machine before applying. Custom-path games
+    # restore to their own configured paths, so they need no remap here.
+    if not game.custom:
+        try:
+            remapped = sum(
+                apply_remap_to_staged_backup(mp.parent)
+                for mp in restore_dir.rglob("mapping.yaml")
+            )
+        except (OSError, RuntimeError, yaml.YAMLError) as exc:
+            console.print(
+                f"[red]{game.title}: could not remap save paths for this machine "
+                f"({exc}); not restoring.[/red]"
+            )
+            return False
+        if remapped:
+            console.print(f"[dim]Remapped {remapped} save path(s) for this machine.[/dim]")
 
     # Download verified — secure the current on-disk state before applying.
     # If that fails, DO NOT restore: overwriting the only copy of local
@@ -1679,7 +1771,7 @@ def _apply_cloud_version(
         return False
 
     try:
-        restore_from_backup(ludusavi_path, game, restore_dir)
+        _apply_staged_backup(game, restore_dir, ludusavi_path)
     except RuntimeError as exc:
         console.print(f"[red]Restore failed for {game.title}: {exc}[/red]")
         return False

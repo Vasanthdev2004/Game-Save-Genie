@@ -50,6 +50,48 @@ def test_version_flag(tmp_path: Path) -> None:
     assert "Game Save Genie" in result.output
 
 
+def test_add_path_creates_custom_game(tmp_path: Path, monkeypatch: object) -> None:
+    import pytest
+
+    from game_save_genie.config import load_games
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    cfg = tmp_path / "c.yaml"
+    saves = tmp_path / "saves"
+    saves.mkdir()
+    result = runner.invoke(
+        app, ["--config", str(cfg), "add", "RetroArch", "--path", str(saves)]
+    )
+    assert result.exit_code == 0
+    assert "custom" in result.output
+    games = load_games(cfg)
+    assert len(games) == 1
+    assert games[0].custom is True
+    assert games[0].save_paths[0].path == saves
+
+
+def test_custom_backup_restore_via_cli(tmp_path: Path, monkeypatch: object) -> None:
+    """Full CLI round-trip: add --path, backup, corrupt, restore."""
+    import pytest
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    monkeypatch.setattr("game_save_genie.cli.get_data_dir", lambda: tmp_path / "data")
+    cfg = tmp_path / "c.yaml"
+    saves = tmp_path / "saves"
+    saves.mkdir()
+    (saves / "hero.srm").write_bytes(b"level-50")
+
+    runner.invoke(app, ["--config", str(cfg), "config", "--backup-dir", str(tmp_path / "bk")])
+    assert runner.invoke(app, ["--config", str(cfg), "add", "RA", "--path", str(saves)]).exit_code == 0
+    b = runner.invoke(app, ["--config", str(cfg), "backup", "ra", "--no-cloud"])
+    assert b.exit_code == 0 and "Backed up" in b.output
+
+    (saves / "hero.srm").write_bytes(b"WIPED")
+    r = runner.invoke(app, ["--config", str(cfg), "restore", "ra"])
+    assert r.exit_code == 0, r.output
+    assert (saves / "hero.srm").read_bytes() == b"level-50"
+
+
 def test_pull_requires_game_or_all(tmp_path: Path) -> None:
     result = runner.invoke(app, ["--config", str(tmp_path / "c.yaml"), "pull"])
     assert result.exit_code == 1

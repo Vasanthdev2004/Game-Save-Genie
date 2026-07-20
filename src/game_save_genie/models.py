@@ -81,6 +81,7 @@ class SaveVersion(BaseModel):
     cloud_remote_path: str | None = None
     sha256: str | None = None
     origin: str = "user"  # "user", "auto", or "safety"
+    content_digest: str | None = None  # stable source-tree hash for custom-game change detection
 
 
 class SyncConfig(BaseModel):

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0 — 2026-07-20
+
+### Added
+- **Custom-path games (`gsg add --path`)** — back up any folder or file directly, bypassing Ludusavi's save database. This covers emulator saves (RetroArch, PCSX2, Dolphin, memcards, save states) and any game Ludusavi doesn't know. Pass `--path` one or more times; changes are detected by content hash so unchanged saves aren't re-backed-up, and everything flows through the same snapshot / delta-cloud-upload / versioning / safety-backup pipeline as Ludusavi games. Restores write back to each machine's own configured paths, so cross-machine sync works and a tampered backup can't redirect a restore.
+
 ## 0.3.0 — 2026-07-18
 
 ### Added
