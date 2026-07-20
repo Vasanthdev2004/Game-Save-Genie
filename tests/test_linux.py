@@ -12,17 +12,35 @@ from game_save_genie.notify import _linux_notify
 
 def test_systemd_unit_content_default_config() -> None:
     unit = _systemd_unit_content(Path("/usr/local/bin/gsg"), None)
-    assert "ExecStart=/usr/local/bin/gsg auto --no-wizard\n" in unit
+    assert 'ExecStart="/usr/local/bin/gsg" auto --no-wizard\n' in unit
     assert "Restart=on-failure" in unit
     assert "WantedBy=default.target" in unit
     # --no-wizard is load-bearing: a headless service must never block on a
     # first-run prompt nobody can see.
     assert "--no-wizard" in unit
+    # Bounded retries: RestartSec=30 spaces starts so far apart that systemd's
+    # default rate limiter never trips — explicit limits are required.
+    assert "StartLimitIntervalSec=600" in unit
+    assert "StartLimitBurst=5" in unit
 
 
 def test_systemd_unit_content_custom_config() -> None:
     unit = _systemd_unit_content(Path("/home/deck/.local/bin/gsg"), Path("/home/deck/gsg.yaml"))
-    assert 'ExecStart=/home/deck/.local/bin/gsg --config "/home/deck/gsg.yaml" auto --no-wizard' in unit
+    assert (
+        'ExecStart="/home/deck/.local/bin/gsg" --config "/home/deck/gsg.yaml" auto --no-wizard'
+        in unit
+    )
+
+
+def test_systemd_unit_content_quotes_spaces_and_escapes_percent() -> None:
+    """systemd splits ExecStart on whitespace and expands % specifiers — a
+    path with spaces must be quoted and % doubled or autostart breaks."""
+    unit = _systemd_unit_content(
+        Path("/home/user/My Projects/Game Save Genie/.venv/bin/gsg"),
+        Path("/home/user/conf 100%/gsg.yaml"),
+    )
+    assert 'ExecStart="/home/user/My Projects/Game Save Genie/.venv/bin/gsg"' in unit
+    assert '--config "/home/user/conf 100%%/gsg.yaml"' in unit
 
 
 def test_linux_notify_invokes_notify_send() -> None:
