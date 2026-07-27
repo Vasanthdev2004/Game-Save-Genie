@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Game Save Genie — Steam Cloud for the games that don't have it</title>
-<meta name="description" content="Automatic, versioned, self-hosted cloud save sync for PC games. Hydra, GOG offline installers, repacks, emulators — anything a launcher isn't protecting. Your saves, your cloud, no subscription.">
+<title>Game Save Genie: Steam Cloud for the games that don't have it</title>
+<meta name="description" content="Automatic, versioned, self-hosted cloud save sync for PC games. Hydra, GOG offline installers, repacks, emulators. Anything a launcher isn't protecting. Your saves, your cloud, no subscription.">
 <link rel="icon" href="assets/icon.png" type="image/png">
 
 <!-- Absolute URLs on purpose: Reddit, Discord and Twitter do not resolve a
@@ -430,6 +430,28 @@ summary::after {
 details[open] summary::after { transform: rotate(-135deg) translate(-2px, -2px); border-color: #c3cdff; }
 details p { color: var(--muted); font-size: .92rem; margin: .85rem 0 0; line-height: 1.6; }
 
+/* Deliberately last and deliberately quiet. The page exists to get someone to
+   trust a backup tool with their save files; the token is not that pitch and
+   must not compete with it. */
+.token-note { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin: 1.4rem 0 0; }
+.ca {
+  font-family: var(--mono); font-size: .8rem; color: var(--text);
+  background: var(--bg-sunken); border: 1px solid var(--line);
+  padding: .55rem .8rem; border-radius: 9px; overflow-wrap: anywhere; min-width: 0;
+}
+.copy-ca {
+  font: 600 .78rem var(--sans); color: var(--text); cursor: pointer;
+  background: var(--bg-raised); border: 1px solid var(--line);
+  padding: .55rem .9rem; border-radius: 9px; transition: border-color .16s ease;
+}
+.copy-ca:hover { border-color: rgba(140,163,255,.4); }
+.onchain {
+  list-style: none; padding: 0; margin: 1.3rem 0 0; display: grid; gap: .45rem;
+  font-size: .87rem; color: var(--muted);
+}
+.onchain li { display: flex; gap: .6rem; align-items: baseline; }
+.onchain b { color: var(--text); font-weight: 600; }
+
 footer { border-top: 1px solid var(--line); padding: 2.5rem 0 3.5rem; color: var(--dim); font-size: .88rem; }
 footer a { color: var(--muted); }
 .foot-row { display: flex; flex-wrap: wrap; gap: 1.2rem; justify-content: space-between; align-items: center; }
@@ -516,7 +538,7 @@ footer a { color: var(--muted); }
     </div>
     <div>
       <p class="label">What it does</p>
-      <p class="body">Backs up the games nothing else is protecting — automatically, versioned, to storage you already own.</p>
+      <p class="body">Backs up the games nothing else is protecting. Automatic, versioned, to storage you already own.</p>
     </div>
     <div>
       <p class="label">Works with</p>
@@ -592,20 +614,20 @@ footer a { color: var(--muted); }
     <p class="eyebrow">The problem</p>
     <h2>If you play outside Steam, nothing is protecting your saves</h2>
     <p class="lede">
-      One corrupted file, one Windows reinstall, one “wait — which PC did I play on last?”
+      One corrupted file, one Windows reinstall, one “wait, which PC did I play on last?”
       and dozens of hours are gone. Paid save-sync services cap your history at a couple of
       backups and delete everything when you stop paying.
     </p>
     <p class="lede">
       Game Save Genie runs quietly in the background and gives those games what the
       launchers give theirs. Steam, Epic and Xbox titles are detected and skipped
-      automatically — they already sync their own saves.
+      automatically, because they already sync their own saves.
     </p>
     <div class="shot">
       <img src="assets/dashboard.svg" alt="The gsg dashboard: tracked games on the left with backup counts and cloud target, save versions on the right, and an activity log below.">
     </div>
     <p class="shot-caption">
-      <code>gsg</code> — arrow to a version, press <code>r</code> to restore. No ids to copy.
+      <code>gsg</code>. Arrow to a version, press <code>r</code> to restore. No ids to copy.
     </p>
   </div>
 </section>
@@ -624,7 +646,7 @@ footer a { color: var(--muted); }
       <div class="step surface">
         <span class="num">STEP 02</span>
         <h3>Connect your cloud</h3>
-        <p>Run <code>gsg</code>. Google Drive and OneDrive open a browser — sign in, click
+        <p>Run <code>gsg</code>. Google Drive and OneDrive open a browser. Sign in and click
            Allow. For any S3 bucket or your own server, run <code>gsg setup-s3</code>
            instead.</p>
       </div>
@@ -652,13 +674,13 @@ footer a { color: var(--muted); }
       <div class="card surface">
         <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></span>
         <h3>Emulators too</h3>
-        <p><code>gsg add --path</code> backs up any folder — RetroArch, PCSX2, Dolphin,
-           memory cards, save states — so games Ludusavi doesn't know are covered.</p>
+        <p><code>gsg add --path</code> backs up any folder (RetroArch, PCSX2, Dolphin,
+           memory cards, save states), so games Ludusavi doesn't know are covered.</p>
       </div>
       <div class="card surface">
         <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v4h4"/><path d="M12 8v4.5l3 1.8"/></svg></span>
         <h3>Every session is a version</h3>
-        <p>Immutable, checksummed snapshots — roll back to any recent session, not just to
+        <p>Immutable, checksummed snapshots. Roll back to any recent session, not just to
            “last backup”. The last 10 are kept by default; raise it with
            <code>max_versions</code>.</p>
       </div>
@@ -724,11 +746,11 @@ footer a { color: var(--muted); }
       </table>
     </div>
     <p class="lede" style="margin-top:1.1rem; font-size:.9rem;">
-      Game Backup Monitor is a good tool that also auto-backs-up and auto-restores — its
+      Game Backup Monitor is a good tool that also auto-backs-up and auto-restores. Its
       difference is cloud: “cloud” there means pointing backups at a separate folder-sync
       client. Ludusavi is an excellent backup engine, and Game Save Genie is built on it.
       Hydra Cloud caps each backup at 500&nbsp;MB and deletes saves 7 days after a
-      subscription ends. Comparison reflects mid-2026 — check each project for current
+      subscription ends. Comparison reflects mid-2026, so check each project for current
       features.
     </p>
   </div>
@@ -762,7 +784,7 @@ footer a { color: var(--muted); }
     </div>
 
     <h3 style="margin-top:2.5rem;">Everyday commands</h3>
-    <pre><code>gsg                  <span class="cmt"># the dashboard — browse versions, restore</span>
+    <pre><code>gsg                  <span class="cmt"># the dashboard: browse versions, restore</span>
 gsg auto --install   <span class="cmt"># start at logon, hidden, with a tray icon</span>
 
 gsg status           <span class="cmt"># per-game overview and storage</span>
@@ -771,7 +793,7 @@ gsg pull --all       <span class="cmt"># catch this machine up from the cloud</s
 
     <p class="notice" style="margin-top:1.5rem;">
       <b>Status:</b> single-machine backup on Windows is stable and used daily.
-      Cross-machine sync and Linux/Steam Deck support are <b>beta</b> — solid in testing,
+      Cross-machine sync and Linux/Steam Deck support are <b>beta</b>. Solid in testing,
       but not yet battle-tested across many setups. Keep a second copy of anything
       precious for now, and please
       <a href="https://github.com/Vasanthdev2004/Game-Save-Genie/issues">file an issue</a>
@@ -788,9 +810,9 @@ gsg pull --all       <span class="cmt"># catch this machine up from the cloud</s
     <details>
       <summary>Where do my saves actually live?</summary>
       <p>In storage you own. On your PC, every version is a plain zip of a Ludusavi backup
-         tree you can open with anything. In the cloud they're stored de-duplicated — each
-         file's contents once under its SHA-256, plus a readable JSON manifest per version —
-         which is how an unchanged 40&nbsp;MB save avoids being re-uploaded.</p>
+         tree you can open with anything. In the cloud they're stored de-duplicated: each
+         file's contents once under its SHA-256, plus a readable JSON manifest per version.
+         That is how an unchanged 40&nbsp;MB save avoids being re-uploaded.</p>
       <p>No accounts, no servers of ours, no telemetry: <code>gsg</code> only ever talks to
          the remote you configured and to GitHub, to download Ludusavi and rclone.</p>
     </details>
@@ -801,7 +823,7 @@ gsg pull --all       <span class="cmt"># catch this machine up from the cloud</s
          plain zips of a Ludusavi backup tree, so Ludusavi can restore them directly without
          <code>gsg</code> involved at all.</p>
       <p>The cloud copy is content-addressed, so rebuilding it by hand means following a
-         manifest — plain JSON listing each file's path and hash. It's MIT-licensed and runs
+         manifest, which is plain JSON listing each file's path and hash. It's MIT-licensed and runs
          on your own storage, so there's no vendor here to cut you off.</p>
     </details>
 
@@ -815,7 +837,7 @@ gsg pull --all       <span class="cmt"># catch this machine up from the cloud</s
     <details>
       <summary>Can I self-host the storage?</summary>
       <p>Yes. There's a <code>docker compose up</code> save server that works with any
-         S3-compatible store — MinIO, Garage, TrueNAS — with per-friend accounts, so your
+         S3-compatible store (MinIO, Garage, TrueNAS) with per-friend accounts, so your
          saves never leave your network.</p>
     </details>
 
@@ -825,6 +847,45 @@ gsg pull --all       <span class="cmt"># catch this machine up from the cloud</s
          systemd user service, <code>notify-send</code> notifications, and Steam detection
          across native, Deck and Flatpak paths. What it needs now is real-world mileage.</p>
     </details>
+  </div>
+</section>
+
+<section id="token">
+  <div class="wrap">
+    <p class="eyebrow">Token</p>
+    <h2>$GSG on Solana</h2>
+    <p class="lede">
+      A community token on Solana, named after this project. Trading fees from $GSG go
+      toward running Game Save Genie: hosting, the domain, and build infrastructure.
+      The software itself stays MIT-licensed and free and always will be, and the token
+      is not required to use any of it.
+    </p>
+    <p class="lede">
+      Holding $GSG grants <b>no ownership, governance, revenue share, or claim of any
+      kind</b> over the software, its repository, or its roadmap. Risk only what you can
+      afford to lose.
+    </p>
+
+    <ul class="onchain">
+      <li><b>Mint authority</b> revoked, so the supply cannot be inflated</li>
+      <li><b>Freeze authority</b> revoked, so accounts cannot be frozen</li>
+      <li><b>Supply</b> 1,000,000,000, fixed</li>
+    </ul>
+
+    <div class="token-note">
+      <code class="ca" id="ca">8kbEWnJpRy3ApLDgN7dacQcKqN2WVoLq3ALjzQgipump</code>
+      <button class="copy-ca" id="copy-ca" type="button">Copy mint</button>
+    </div>
+    <p class="lede" style="margin-top:1rem; font-size:.87rem;">
+      This mint, on Solana, is the only token connected to this page. Check the address
+      character by character before buying anything called GSG. Names and tickers are
+      not unique across chains, and copies are trivial to make.
+    </p>
+    <p style="margin-top:.9rem;">
+      <a class="card-link" href="https://pump.fun/coin/8kbEWnJpRy3ApLDgN7dacQcKqN2WVoLq3ALjzQgipump">
+        View on pump.fun <span aria-hidden="true">&rarr;</span>
+      </a>
+    </p>
   </div>
 </section>
 
@@ -872,6 +933,25 @@ gsg pull --all       <span class="cmt"># catch this machine up from the cloud</s
   links.forEach((link) => link.addEventListener('click', () => setOpen(false)));
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && menu.dataset.open === 'true') setOpen(false);
+  });
+})();
+
+// A 44-character mint address is miserable to select by hand on a phone, and
+// mis-copying one character is how people buy the wrong token.
+(() => {
+  const btn = document.getElementById('copy-ca');
+  const ca = document.getElementById('ca');
+  if (!btn || !ca || !navigator.clipboard) return;
+  btn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(ca.textContent.trim());
+      const original = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = original; }, 1600);
+    } catch {
+      // Clipboard can be blocked by permissions; the address is on screen
+      // either way, so this is not worth an error message.
+    }
   });
 })();
 
