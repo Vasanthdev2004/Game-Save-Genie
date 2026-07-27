@@ -430,28 +430,6 @@ summary::after {
 details[open] summary::after { transform: rotate(-135deg) translate(-2px, -2px); border-color: #c3cdff; }
 details p { color: var(--muted); font-size: .92rem; margin: .85rem 0 0; line-height: 1.6; }
 
-/* Deliberately last and deliberately quiet. The page exists to get someone to
-   trust a backup tool with their save files; the token is not that pitch and
-   must not compete with it. */
-.token-note { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin: 1.4rem 0 0; }
-.ca {
-  font-family: var(--mono); font-size: .8rem; color: var(--text);
-  background: var(--bg-sunken); border: 1px solid var(--line);
-  padding: .55rem .8rem; border-radius: 9px; overflow-wrap: anywhere; min-width: 0;
-}
-.copy-ca {
-  font: 600 .78rem var(--sans); color: var(--text); cursor: pointer;
-  background: var(--bg-raised); border: 1px solid var(--line);
-  padding: .55rem .9rem; border-radius: 9px; transition: border-color .16s ease;
-}
-.copy-ca:hover { border-color: rgba(140,163,255,.4); }
-.onchain {
-  list-style: none; padding: 0; margin: 1.3rem 0 0; display: grid; gap: .45rem;
-  font-size: .87rem; color: var(--muted);
-}
-.onchain li { display: flex; gap: .6rem; align-items: baseline; }
-.onchain b { color: var(--text); font-weight: 600; }
-
 footer { border-top: 1px solid var(--line); padding: 2.5rem 0 3.5rem; color: var(--dim); font-size: .88rem; }
 footer a { color: var(--muted); }
 .foot-row { display: flex; flex-wrap: wrap; gap: 1.2rem; justify-content: space-between; align-items: center; }
@@ -850,45 +828,6 @@ gsg pull --all       <span class="cmt"># catch this machine up from the cloud</s
   </div>
 </section>
 
-<section id="token">
-  <div class="wrap">
-    <p class="eyebrow">Token</p>
-    <h2>$GSG on Solana</h2>
-    <p class="lede">
-      A community token on Solana, named after this project. Trading fees from $GSG go
-      toward running Game Save Genie: hosting, the domain, and build infrastructure.
-      The software itself stays MIT-licensed and free and always will be, and the token
-      is not required to use any of it.
-    </p>
-    <p class="lede">
-      Holding $GSG grants <b>no ownership, governance, revenue share, or claim of any
-      kind</b> over the software, its repository, or its roadmap. Risk only what you can
-      afford to lose.
-    </p>
-
-    <ul class="onchain">
-      <li><b>Mint authority</b> revoked, so the supply cannot be inflated</li>
-      <li><b>Freeze authority</b> revoked, so accounts cannot be frozen</li>
-      <li><b>Supply</b> 1,000,000,000, fixed</li>
-    </ul>
-
-    <div class="token-note">
-      <code class="ca" id="ca">8kbEWnJpRy3ApLDgN7dacQcKqN2WVoLq3ALjzQgipump</code>
-      <button class="copy-ca" id="copy-ca" type="button">Copy mint</button>
-    </div>
-    <p class="lede" style="margin-top:1rem; font-size:.87rem;">
-      This mint, on Solana, is the only token connected to this page. Check the address
-      character by character before buying anything called GSG. Names and tickers are
-      not unique across chains, and copies are trivial to make.
-    </p>
-    <p style="margin-top:.9rem;">
-      <a class="card-link" href="https://pump.fun/coin/8kbEWnJpRy3ApLDgN7dacQcKqN2WVoLq3ALjzQgipump">
-        View on pump.fun <span aria-hidden="true">&rarr;</span>
-      </a>
-    </p>
-  </div>
-</section>
-
 </main>
 
 <footer>
@@ -933,25 +872,6 @@ gsg pull --all       <span class="cmt"># catch this machine up from the cloud</s
   links.forEach((link) => link.addEventListener('click', () => setOpen(false)));
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && menu.dataset.open === 'true') setOpen(false);
-  });
-})();
-
-// A 44-character mint address is miserable to select by hand on a phone, and
-// mis-copying one character is how people buy the wrong token.
-(() => {
-  const btn = document.getElementById('copy-ca');
-  const ca = document.getElementById('ca');
-  if (!btn || !ca || !navigator.clipboard) return;
-  btn.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(ca.textContent.trim());
-      const original = btn.textContent;
-      btn.textContent = 'Copied';
-      setTimeout(() => { btn.textContent = original; }, 1600);
-    } catch {
-      // Clipboard can be blocked by permissions; the address is on screen
-      // either way, so this is not worth an error message.
-    }
   });
 })();
 
