@@ -200,21 +200,70 @@ def download_rclone(target_dir: Path) -> Path:
     return binary_path
 
 
-def _rclone_asset_name(release_info: dict[str, Any]) -> str:
-    """Return the rclone asset name for the current platform from the release."""
-    import platform
-    if os.name == "nt":
-        suffix = "windows-amd64.zip"
-    elif platform.system() == "Darwin":
-        suffix = "osx-amd64.zip"
-    else:
-        suffix = "linux-amd64.tar.gz"
+# rclone names every release asset "rclone-v<version>-<os>-<arch>.zip". It
+# publishes .zip for ALL platforms, including Linux and macOS: there has never
+# been a linux .tar.gz, so asking for one failed every Linux install outright.
+_RCLONE_OS = {
+    "Windows": "windows",
+    "Darwin": "osx",
+    "Linux": "linux",
+    "FreeBSD": "freebsd",
+    "NetBSD": "netbsd",
+    "OpenBSD": "openbsd",
+    "SunOS": "solaris",
+}
 
+# platform.machine() is not normalised across OSes: the same 64-bit Intel chip
+# reports "x86_64" on Linux and "AMD64" on Windows, and 64-bit ARM is
+# "aarch64" or "arm64" depending on who you ask.
+_RCLONE_ARCH = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+    "i386": "386",
+    "i686": "386",
+    "x86": "386",
+    "armv6l": "arm",
+    "armv7l": "arm",
+    "arm": "arm",
+}
+
+
+def _rclone_asset_name(release_info: dict[str, Any]) -> str:
+    """Return the rclone asset name for the current platform from the release.
+
+    Both halves used to be wrong: the extension was .tar.gz on Linux, which
+    rclone does not ship, and the architecture was hardcoded to amd64, so an
+    arm64 machine would have been handed an Intel binary even once the
+    extension was right.
+    """
+    import platform
+
+    system = platform.system()
+    machine = platform.machine().lower()
+
+    os_token = _RCLONE_OS.get(system)
+    arch_token = _RCLONE_ARCH.get(machine)
+
+    if os_token is None or arch_token is None:
+        raise RuntimeError(
+            f"No known rclone build for {system}/{platform.machine()}. "
+            f"Install rclone yourself and gsg will use it: it checks PATH "
+            f"before downloading anything."
+        )
+
+    suffix = f"{os_token}-{arch_token}.zip"
     for asset in release_info.get("assets", []):
         name = str(asset.get("name", ""))
         if name.startswith("rclone-v") and name.endswith(suffix):
             return name
-    raise RuntimeError(f"Could not find rclone asset for {suffix}")
+
+    raise RuntimeError(
+        f"This rclone release has no {suffix} build. "
+        f"Install rclone yourself and gsg will use it: it checks PATH "
+        f"before downloading anything."
+    )
 
 
 
