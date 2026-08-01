@@ -26,3 +26,40 @@ jobs:
         run: mypy src tests
       - name: Test
         run: pytest -q
+
+  # The matrix above installs .[dev], so a dev tool can supply a runtime
+  # dependency and hide a missing declaration indefinitely. black depends on
+  # click, which is why every job stayed green while `import click` had no
+  # declared supplier and a user hit ModuleNotFoundError on first run (#20).
+  runtime-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Checks the declaration, so it catches imports that are unreachable at
+      # module scope too. Runs before install: it reads files, not the env.
+      - name: Every third-party import is declared
+        run: python packaging/check_deps.py
+
+      # No [dev]. This is the environment a user actually gets.
+      - name: Install runtime dependencies only
+        run: pip install .
+
+      - name: Import every module
+        run: |
+          python - <<'EOF'
+          import importlib, pkgutil, game_save_genie
+          for module in pkgutil.walk_packages(
+              game_save_genie.__path__, "game_save_genie."
+          ):
+              importlib.import_module(module.name)
+              print("ok", module.name)
+          EOF
+
+      - name: Entry point runs
+        run: |
+          gsg --version
+          gsg --help > /dev/null

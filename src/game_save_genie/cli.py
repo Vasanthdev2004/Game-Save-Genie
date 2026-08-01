@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO
 
+import click
 import typer
 import yaml
 from rich.console import Console
@@ -1972,8 +1973,6 @@ def _run_setup_wizard(ctx: typer.Context) -> bool:
     console.print("  [bold]2[/bold]  OneDrive      (free 5 GB, sign in via browser)")
     console.print("  [bold]3[/bold]  Railway S3    (advanced: endpoint + keys from railway.app)")
     console.print("  [bold]4[/bold]  Not now")
-    import click
-
     choice = typer.prompt(
         "Choice", default="1", type=click.Choice(["1", "2", "3", "4"]),
         show_choices=False,
