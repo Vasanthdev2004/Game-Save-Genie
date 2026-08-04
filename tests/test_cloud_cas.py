@@ -142,3 +142,48 @@ def test_legacy_zip_still_works_alongside_cas(remote: tuple[str, str], tmp_path:
     assert cloud.download_save(RCLONE, GAME, v_old.id, dl_old, name, root).success
     got = dl_old / "Test Game" / "drive-C" / "Users" / "vasan" / "saves" / "slot1.sav"
     assert got.read_bytes() == b"OLD" * 5000
+
+
+def test_a_two_hundred_blob_version_round_trips(
+    remote: tuple[str, str], tmp_path: Path
+) -> None:
+    """A version big enough to span most blob shards, end to end.
+
+    This does NOT prove anything about --fast-list. The fixture remote is
+    type=local, which reports ListR: false, so rclone ignores the flag here
+    and the test passes with it removed. Whether the flag is passed at all is
+    pinned by the unit tests in test_cloud.py, which CI actually runs; that
+    it changes nothing observable is rclone's guarantee, not ours.
+
+    What this does prove, against a real rclone binary, is that a 200-blob
+    version survives the round trip: every blob arrives, a second upload of
+    identical content sends none, and the tree comes back byte for byte.
+    """
+    name, root = remote
+    assert RCLONE is not None
+
+    tree = tmp_path / "big" / "Test Game" / "drive-C" / "saves"
+    tree.mkdir(parents=True)
+    (tmp_path / "big" / "Test Game" / "mapping.yaml").write_text(
+        "name: Test Game\n", encoding="utf-8"
+    )
+    for i in range(200):
+        (tree / f"slot{i:03d}.sav").write_bytes(f"UNIQUE-{i}".encode() * 200)
+
+    big = _version("20260718-110000-000000", tmp_path / "big", tmp_path)
+    assert cloud.upload_save_cas(RCLONE, GAME, big, name, root).success
+    # 200 distinct payloads plus mapping.yaml.
+    assert _blob_count(name, root) == 201
+
+    # Same content again: nothing new to send. Verified to be a real
+    # assertion, not a tautology - pointing the upload at a different remote
+    # prefix makes this line fail.
+    again = _version("20260718-111000-000000", tmp_path / "big", tmp_path)
+    assert cloud.upload_save_cas(RCLONE, GAME, again, name, root).success
+    assert _blob_count(name, root) == 201
+
+    dl = tmp_path / "dl-big"
+    assert cloud.download_save(RCLONE, GAME, big.id, dl, name, root).success
+    for i in (0, 99, 199):
+        got = dl / "Test Game" / "drive-C" / "saves" / f"slot{i:03d}.sav"
+        assert got.read_bytes() == f"UNIQUE-{i}".encode() * 200

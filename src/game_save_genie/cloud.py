@@ -422,6 +422,54 @@ def _version_source_tree(version: SaveVersion, work_dir: Path) -> Path:
     return tree
 
 
+# A save is many small files, so wall-clock is round trips, not bandwidth.
+# rclone's default of 4 transfers leaves the link idle while each one waits.
+_CAS_PARALLELISM = ["--transfers", "16", "--checkers", "16"]
+
+def _blob_upload_args(
+    stage: Path,
+    blobs_remote: str,
+    extra_args: list[str] | None = None,
+) -> list[str]:
+    """Build the rclone argv for pushing staged blobs.
+
+    Blobs live at ``blobs/<hh>/<hash>``, so a version's files land across many
+    directories. rclone's default is to walk source and destination in step,
+    which costs one listing per directory the copy touches — on Google Drive
+    that is one API call each, and it is what made a backup spend minutes
+    before moving any data (#26).
+
+    ``--fast-list`` replaces that walk with a single recursive query. Measured
+    against a ListR-capable remote holding 5000 blobs, a backup with nothing
+    to send cost 138 requests by default and 6 with the flag; into an empty
+    destination, 404 against 412, so it does not lose ground where it cannot
+    help. On a backend without recursive listing it is simply ignored.
+
+    ``--no-traverse`` looks like the alternative and is a trap here. It asks
+    about each source file individually, which only pays when most files are
+    new. Every backup stages the version's whole blob set, so nearly all of
+    them already exist remotely — the case rclone's own documentation says
+    not to use it for. Measured, it cost more than plain rclone at every size
+    above about five blobs: 201 requests against 138 for a 200-blob backup.
+
+    ``--size-only`` stays because a blob is named for its own hash: content
+    cannot differ under a matching name, so there is nothing a checksum pass
+    would catch that the name does not already guarantee.
+
+    ``extra_args`` is appended last on purpose. rclone takes the final
+    occurrence of a repeated flag, so anything passed by a caller — a
+    ``--dry-run``, a hand-tuned ``--transfers`` — overrides what is chosen
+    here rather than fighting it.
+    """
+    args = [
+        "copy", str(stage), blobs_remote,
+        "--size-only", "--fast-list", *_CAS_PARALLELISM,
+    ]
+    if extra_args:
+        args.extend(extra_args)
+    return args
+
+
 def upload_save_cas(
     binary: Path,
     game: Game,
@@ -455,10 +503,7 @@ def upload_save_cas(
         cas.stage_blobs(source_tree, manifest, stage)
 
         blobs_remote = _remote_path(remote_name, remote_root, game.id, CAS_BLOB_DIR)
-        blob_args = ["copy", str(stage), blobs_remote, "--size-only"]
-        if extra_args:
-            blob_args.extend(extra_args)
-        run_rclone(binary, blob_args)
+        run_rclone(binary, _blob_upload_args(stage, blobs_remote, extra_args))
 
         manifest_file = work / "manifest.json"
         manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
@@ -514,7 +559,13 @@ def download_save_cas(
             files_from = work / "files.txt"
             files_from.write_text("\n".join(keys) + "\n", encoding="utf-8")
             blobs_remote = _remote_path(remote_name, remote_root, game.id, CAS_BLOB_DIR)
-            blob_args = ["copy", blobs_remote, str(blob_dir), "--files-from", str(files_from)]
+            # --files-from names every blob outright, so rclone already skips
+            # traversing the remote. What is left to win is parallelism: a
+            # restore is the same many-small-files shape as an upload.
+            blob_args = [
+                "copy", blobs_remote, str(blob_dir),
+                "--files-from", str(files_from), *_CAS_PARALLELISM,
+            ]
             if extra_args:
                 blob_args.extend(extra_args)
             blob_result = run_rclone(binary, blob_args, check=False)

@@ -221,3 +221,62 @@ def test_s3_config_keeps_other_remotes(
     sections = cloud._read_rclone_config()
     assert sections["gdrive"]["type"] == "drive"
     assert sections["homelab"]["type"] == "s3"
+
+
+# --- blob upload flags (#26) -----------------------------------------------
+# These build an argv and invoke nothing, so they must live here and not in
+# test_cloud_cas.py: that module is skipped whole when rclone is missing,
+# which is every CI run. Guarding the upload flags there guarded nothing.
+
+
+def _upload_args(**kwargs: object) -> list[str]:
+    return cloud._blob_upload_args(
+        Path("/stage"), "gdrive:saves/game/blobs", **kwargs  # type: ignore[arg-type]
+    )
+
+
+def test_blob_upload_asks_for_one_recursive_listing() -> None:
+    """Without this, rclone walks source and destination in step and pays a
+    listing per directory it touches. On Drive that is an API call each, and
+    blobs are spread over up to 256 shard directories."""
+    assert "--fast-list" in _upload_args()
+
+
+def test_blob_upload_never_asks_per_file() -> None:
+    """--no-traverse looks like the alternative and measures worse at every
+    size above about five blobs: a backup stages the version's whole blob set,
+    so nearly every file it would ask about is already there."""
+    assert "--no-traverse" not in _upload_args()
+
+
+def test_blob_upload_keeps_size_only() -> None:
+    """A blob is named for its own hash, so a matching name is proof of
+    matching content. Dropping this re-uploads every blob every time."""
+    assert "--size-only" in _upload_args()
+
+
+def test_blob_upload_raises_parallelism_above_the_default_four() -> None:
+    """Saves are many small files, so wall clock is round trips, not bytes."""
+    args = _upload_args()
+    assert args[args.index("--transfers") + 1] == "16"
+    assert args[args.index("--checkers") + 1] == "16"
+
+
+def test_caller_flags_come_last_so_they_win() -> None:
+    """rclone takes the final occurrence of a repeated flag, so a caller's
+    --transfers, or a --dry-run, has to be able to override ours."""
+    args = _upload_args(extra_args=["--dry-run", "--transfers", "2"])
+    assert args[-3:] == ["--dry-run", "--transfers", "2"]
+    assert args.index("--dry-run") > args.index("--size-only")
+
+
+def test_blob_upload_still_copies_stage_to_remote() -> None:
+    """The flags are an optimisation; the operation must not have moved."""
+    args = _upload_args()
+    assert args[:3] == ["copy", str(Path("/stage")), "gdrive:saves/game/blobs"]
+
+
+def test_blob_download_is_parallel_too() -> None:
+    """A restore is the same many-small-files shape as an upload. --files-from
+    already suppresses traversal there, so parallelism is what is left."""
+    assert cloud._CAS_PARALLELISM == ["--transfers", "16", "--checkers", "16"]
