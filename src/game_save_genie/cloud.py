@@ -89,15 +89,48 @@ def _write_rclone_config(sections: dict[str, dict[str, str]]) -> None:
             f.write("\n")
 
 
-def write_railway_s3_config(
+def endpoint_has_scheme(endpoint: str) -> bool:
+    """True if the endpoint already says http:// or https://.
+
+    rclone assumes https for a scheme-less endpoint, so "myserver:9000" is not
+    an unspecified choice — it is a decision to use TLS, made on the user's
+    behalf, against a server that usually has none.
+    """
+    return endpoint.strip().lower().startswith(("http://", "https://"))
+
+
+def normalize_endpoint(endpoint: str, scheme: str | None = None) -> str:
+    """Clean up a typed endpoint, optionally forcing a scheme onto it.
+
+    Trailing slashes are stripped because rclone joins paths itself; a trailing
+    one produces a double slash in the signed URL, which some S3
+    implementations reject.
+    """
+    cleaned = endpoint.strip().rstrip("/")
+    if scheme is not None and not endpoint_has_scheme(cleaned):
+        return f"{scheme}://{cleaned}"
+    return cleaned
+
+
+def write_s3_config(
     remote_name: str,
     endpoint: str,
     access_key: str,
     secret_key: str,
     bucket: str,
     region: str = "auto",
+    force_path_style: bool = True,
 ) -> Path:
-    """Write an rclone S3 remote config for Railway S3-compatible storage."""
+    """Write an rclone S3 remote config for any S3-compatible storage.
+
+    ``force_path_style`` decides how the bucket reaches the server: ``True``
+    addresses it as a path (``http://host:9000/bucket``), ``False`` as a
+    subdomain (``http://bucket.host:9000``). Self-hosted servers — MinIO,
+    Garage, Ceph — and anything behind a reverse proxy only answer to the
+    first, because nothing resolves ``bucket.myserver.lan``. It defaults to
+    True for that reason; hosted providers needing subdomain addressing pass
+    False.
+    """
     sections = _read_rclone_config()
     sections[remote_name] = {
         "type": "s3",
@@ -105,10 +138,10 @@ def write_railway_s3_config(
         "env_auth": "false",
         "access_key_id": access_key,
         "secret_access_key": secret_key,
-        "endpoint": endpoint,
+        "endpoint": normalize_endpoint(endpoint),
         "region": region,
         "bucket": bucket,
-        "force_path_style": "false",
+        "force_path_style": "true" if force_path_style else "false",
     }
     _write_rclone_config(sections)
     return get_rclone_config_path()

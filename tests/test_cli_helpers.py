@@ -533,3 +533,106 @@ def test_purge_warns_when_no_remote_is_configured(
     result = runner.invoke(app, ["--config", cfg, "remove", "local-only", "--purge"])
     assert result.exit_code == 0, result.output
     assert "were NOT deleted" in _flat(result.output)
+
+
+# --- S3 endpoint setup (#24) -----------------------------------------------
+# A self-hosted MinIO speaks plain HTTP. rclone assumes https for a scheme-less
+# endpoint, so "myserver:9000" produced a TLS error the reporter could not act
+# on. Setup now tries the stated interpretation first and falls back.
+
+
+def test_endpoint_with_a_scheme_is_taken_at_its_word() -> None:
+    from game_save_genie.cli import _endpoint_candidates
+
+    assert _endpoint_candidates("http://host:9000") == ["http://host:9000"]
+    assert _endpoint_candidates("https://s3.example.com") == ["https://s3.example.com"]
+
+
+def test_scheme_less_endpoint_tries_tls_before_plaintext() -> None:
+    from game_save_genie.cli import _endpoint_candidates
+
+    assert _endpoint_candidates("host:9000") == ["https://host:9000", "http://host:9000"]
+
+
+def test_empty_endpoint_has_nothing_to_try() -> None:
+    from game_save_genie.cli import _endpoint_candidates
+
+    assert _endpoint_candidates("   ") == []
+
+
+def _fake_probe(succeed_on: str) -> object:
+    """A _probe_s3_remote stand-in that only accepts one endpoint scheme."""
+    import game_save_genie.cloud as cloud_module
+
+    def probe(config_path: Path, remote_name: str, bucket: str) -> tuple[bool, str]:
+        written = cloud_module._read_rclone_config()[remote_name]["endpoint"]
+        if written.startswith(succeed_on):
+            return True, ""
+        return False, "server gave HTTP response to HTTPS client"
+
+    return probe
+
+
+def _run_setup(
+    tmp_path: Path, monkeypatch: object, succeed_on: str, endpoint: str
+) -> tuple[bool, dict[str, str]]:
+    import pytest
+
+    import game_save_genie.cli as cli_module
+    import game_save_genie.cloud as cloud_module
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    conf = tmp_path / "rclone.conf"
+    monkeypatch.setattr(cloud_module, "get_rclone_config_path", lambda: conf)
+    monkeypatch.setattr(cli_module, "_probe_s3_remote", _fake_probe(succeed_on))
+
+    ok = cli_module._configure_and_verify_s3(
+        tmp_path / "config.yaml", "homelab", endpoint, "k", "s", "saves", "auto",
+    )
+    return ok, cloud_module._read_rclone_config().get("homelab", {})
+
+
+def test_plain_http_server_is_reached_after_https_fails(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """The reported case: MinIO on http, endpoint typed without a scheme."""
+    ok, remote = _run_setup(tmp_path, monkeypatch, "http://", "192.0.2.10:9000")
+    assert ok
+    assert remote["endpoint"] == "http://192.0.2.10:9000"
+
+
+def test_https_server_is_not_downgraded(tmp_path: Path, monkeypatch: object) -> None:
+    """https answers first, so plaintext must never be attempted."""
+    ok, remote = _run_setup(tmp_path, monkeypatch, "https://", "s3.example.com")
+    assert ok
+    assert remote["endpoint"] == "https://s3.example.com"
+
+
+def test_explicit_https_is_never_retried_as_http(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """Asking for TLS and silently getting plaintext would be a downgrade."""
+    ok, remote = _run_setup(tmp_path, monkeypatch, "http://", "https://s3.example.com")
+    assert not ok
+    assert remote["endpoint"] == "https://s3.example.com"
+
+
+def test_a_remote_that_never_answers_reverts_the_config(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """Otherwise the wizard never runs again and every upload fails silently."""
+    from game_save_genie.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    ok, _ = _run_setup(tmp_path, monkeypatch, "ftp://", "192.0.2.10:9000")
+    assert not ok
+    config = load_config(config_path)
+    assert config.cloud_provider is None
+    assert config.rclone_remote_name is None
+
+
+def test_setup_writes_path_style_by_default(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    _, remote = _run_setup(tmp_path, monkeypatch, "http://", "192.0.2.10:9000")
+    assert remote["force_path_style"] == "true"

@@ -22,13 +22,15 @@ from .archive import safe_extract_zip, sha256_file, zip_directory
 from .cloud import (
     _remote_path,
     download_save,
+    endpoint_has_scheme,
     get_rclone_path,
     get_remote_size,
     list_remote_versions,
+    normalize_endpoint,
     prune_remote_versions,
     run_rclone,
     upload_save_cas,
-    write_railway_s3_config,
+    write_s3_config,
 )
 from .config import (
     get_config_path,
@@ -1806,7 +1808,12 @@ def setup_railway(
     region: str = typer.Option("auto", help="Region"),
 ) -> None:
     """Configure rclone for Railway S3-compatible storage."""
-    _setup_s3_endpoint(ctx, remote_name, endpoint, access_key, secret_key, bucket, region)
+    # Railway addresses buckets as subdomains, so it is the one caller that
+    # wants path style off.
+    _setup_s3_endpoint(
+        ctx, remote_name, endpoint, access_key, secret_key, bucket, region,
+        force_path_style=False,
+    )
 
 
 @app.command(name="setup-s3")
@@ -1818,12 +1825,21 @@ def setup_s3(
     secret_key: str = typer.Option(..., prompt=True, hide_input=True, help="Secret key"),
     bucket: str = typer.Option(..., prompt=True, help="Bucket name"),
     region: str = typer.Option("auto", help="Region"),
+    path_style: bool = typer.Option(
+        True,
+        "--path-style/--no-path-style",
+        help="Address the bucket as a path (http://host/bucket). Turn off only "
+             "for providers that require bucket.host subdomains.",
+    ),
 ) -> None:
     """Connect any S3-compatible storage: self-hosted MinIO, Garage, Backblaze B2, AWS...
 
     See docker/README.md for running your own save server with docker compose.
     """
-    _setup_s3_endpoint(ctx, remote_name, endpoint, access_key, secret_key, bucket, region)
+    _setup_s3_endpoint(
+        ctx, remote_name, endpoint, access_key, secret_key, bucket, region,
+        force_path_style=path_style,
+    )
 
 
 def _setup_s3_endpoint(
@@ -1834,18 +1850,34 @@ def _setup_s3_endpoint(
     secret_key: str,
     bucket: str,
     region: str,
+    force_path_style: bool = True,
 ) -> None:
     config_path = ctx.obj.get("config_path") or get_config_path()
-    conf = _configure_railway(
-        config_path, remote_name, endpoint, access_key, secret_key, bucket, region
-    )
-    if not _verify_railway_or_revert(config_path, remote_name, bucket):
+    if not _configure_and_verify_s3(
+        config_path, remote_name, endpoint, access_key, secret_key, bucket, region,
+        force_path_style,
+    ):
         raise typer.Exit(1)
-    console.print(f"rclone config written to: {conf}")
-    console.print("Test it with: gsg backup <game-id>")
 
 
-def _configure_railway(
+def _endpoint_candidates(endpoint: str) -> list[str]:
+    """The endpoint URLs to try, in order.
+
+    A typed endpoint that already names its scheme is taken at its word. One
+    that does not is ambiguous, and rclone resolves that ambiguity by assuming
+    https — which is wrong for the common case, a self-hosted server on a LAN
+    with no certificate. Try the safe interpretation first and fall back
+    rather than guessing once and failing with a TLS error nobody can read.
+    """
+    cleaned = normalize_endpoint(endpoint)
+    if not cleaned:
+        return []
+    if endpoint_has_scheme(cleaned):
+        return [cleaned]
+    return [f"https://{cleaned}", f"http://{cleaned}"]
+
+
+def _configure_and_verify_s3(
     config_path: Path,
     remote_name: str,
     endpoint: str,
@@ -1853,10 +1885,63 @@ def _configure_railway(
     secret_key: str,
     bucket: str,
     region: str,
+    force_path_style: bool = True,
+) -> bool:
+    """Write the remote, prove the bucket answers, and revert if it does not."""
+    candidates = _endpoint_candidates(endpoint)
+    if not candidates:
+        console.print("[red]No endpoint given.[/red]")
+        return False
+
+    last_error = ""
+    for candidate in candidates:
+        if len(candidates) > 1:
+            console.print(f"[dim]Trying {candidate} ...[/dim]")
+        conf_path = _configure_s3_remote(
+            config_path, remote_name, candidate, access_key, secret_key, bucket,
+            region, force_path_style,
+        )
+        ok, last_error = _probe_s3_remote(config_path, remote_name, bucket)
+        if ok:
+            if candidate.startswith("http://"):
+                console.print(
+                    "[yellow]Connected over plain HTTP.[/yellow] Your access key and "
+                    "your saves cross this network unencrypted. Fine on a LAN you "
+                    "trust; put TLS in front of the server before using it over the "
+                    "internet."
+                )
+            console.print(f"[green]{remote_name}: S3 storage configured and verified.[/green]")
+            console.print(f"rclone config written to: {conf_path}")
+            console.print("Test it with: gsg backup <game-id>")
+            return True
+
+    _revert_cloud_config(config_path)
+    console.print(
+        f"[red]Could not access the bucket with those credentials:[/red]\n{last_error}"
+    )
+    console.print(
+        "[yellow]Check that:[/yellow]\n"
+        "  the endpoint names scheme, host and port, e.g. http://192.168.1.10:9000\n"
+        f"  the bucket '{bucket}' exists on that server\n"
+        "  the access key and secret belong to a user allowed to list it\n"
+        "  the server is reachable from this machine (try it in a browser)"
+    )
+    return False
+
+
+def _configure_s3_remote(
+    config_path: Path,
+    remote_name: str,
+    endpoint: str,
+    access_key: str,
+    secret_key: str,
+    bucket: str,
+    region: str,
+    force_path_style: bool = True,
 ) -> Path:
     config = load_config(config_path)
-    conf_path = write_railway_s3_config(
-        remote_name, endpoint, access_key, secret_key, bucket, region
+    conf_path = write_s3_config(
+        remote_name, endpoint, access_key, secret_key, bucket, region, force_path_style
     )
     config.cloud_provider = CloudProvider.S3
     config.rclone_remote_name = remote_name
@@ -1991,10 +2076,10 @@ def _run_setup_wizard(ctx: typer.Context) -> bool:
         access_key = typer.prompt("Access key", hide_input=True)
         secret_key = typer.prompt("Secret key", hide_input=True)
         bucket = typer.prompt("Bucket name")
-        _configure_railway(
-            config_path, "railway", endpoint, access_key, secret_key, bucket, "auto"
+        ok = _configure_and_verify_s3(
+            config_path, "railway", endpoint, access_key, secret_key, bucket, "auto",
+            force_path_style=False,
         )
-        ok = _verify_railway_or_revert(config_path, "railway", bucket)
     else:
         console.print("[dim]Skipped cloud setup. Run 'gsg' again any time.[/dim]")
         return False
@@ -2010,27 +2095,39 @@ def _run_setup_wizard(ctx: typer.Context) -> bool:
     return ok
 
 
-def _verify_railway_or_revert(config_path: Path, remote_name: str, bucket: str) -> bool:
-    """Confirm the S3 credentials actually work; revert config if they don't.
+# A config check is not a transfer, so it must not inherit transfer-grade
+# patience. rclone defaults to ten attempts with backoff, which turned a typo
+# into a 2.5-minute wait before the error appeared (#24) — long enough that
+# nobody iterates, which is exactly what setup requires.
+_S3_PROBE_ARGS = [
+    "--retries", "1",
+    "--low-level-retries", "1",
+    "--contimeout", "10s",
+    "--timeout", "30s",
+]
+
+
+def _probe_s3_remote(config_path: Path, remote_name: str, bucket: str) -> tuple[bool, str]:
+    """Ask the remote to list the bucket. Returns (worked, error text)."""
+    rclone_path = get_rclone_path(config_path)
+    result = run_rclone(
+        rclone_path, ["lsd", f"{remote_name}:{bucket}", *_S3_PROBE_ARGS], check=False
+    )
+    if result.returncode == 0:
+        return True, ""
+    return False, (result.stderr or result.stdout or "").strip()
+
+
+def _revert_cloud_config(config_path: Path) -> None:
+    """Undo a cloud provider selection that failed to verify.
 
     Without this, a pasted typo would be declared 'configured', the wizard
     would never run again, and every upload would fail invisibly at runtime.
     """
-    rclone_path = get_rclone_path(config_path)
-    result = run_rclone(rclone_path, ["lsd", f"{remote_name}:{bucket}"], check=False)
-    if result.returncode == 0:
-        console.print("[green]Railway S3 configured and verified.[/green]")
-        return True
-    console.print(
-        f"[red]Could not access the bucket with those credentials:[/red]\n"
-        f"{(result.stderr or result.stdout or '').strip()}\n"
-        f"[yellow]Check the endpoint URL, keys, and bucket name, then try again.[/yellow]"
-    )
     config = load_config(config_path)
     config.cloud_provider = None
     config.rclone_remote_name = None
     save_config(config, config_path)
-    return False
 
 
 @app.command()

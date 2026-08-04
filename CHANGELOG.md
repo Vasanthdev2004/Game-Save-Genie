@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+
+
+Three ways a new install could fail before it ever backed anything up. All three were reported by people trying to use it, none were reachable from Windows, which is where it was written.
+
+
+
+### Fixed
+
+- **`gsg` could not install itself on Linux.** The rclone downloader asked for an asset named `linux-amd64.tar.gz`. rclone publishes `.zip` for every platform it supports and never has published a Linux tarball, so first run ended in `Could not find rclone asset` on every Linux machine. The architecture was hardcoded to `amd64` besides, so arm64 — Apple Silicon, Raspberry Pi, ARM handhelds — would have been handed an Intel binary even once the extension was right. Both are derived from the running platform now. ([#1](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/1))
+
+- **Self-hosted S3 could not be connected at all.** `gsg setup-s3` wrote `force_path_style = false`, which addresses a bucket as a subdomain: `game-saves.myserver.lan`. Nothing self-hosted resolves that, and nothing behind a reverse proxy has a certificate for it, so MinIO, Garage, Ceph and every TLS-terminated endpoint were unreachable regardless of what the user typed. Path style is the default now, and `--no-path-style` is there for hosted providers that need subdomains. ([#24](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/24))
+
+- **An endpoint without `http://` silently became HTTPS.** rclone assumes TLS for a scheme-less endpoint, so `myserver:9000` produced `server gave HTTP response to HTTPS client` — an error that tells you nothing about what to type instead. Setup now tries HTTPS first and falls back to HTTP, and says plainly when it lands on plaintext and what that exposes.
+
+- **A wrong S3 endpoint took 2.5 minutes to say so.** The credential check ran with rclone's default ten attempts and backoff, which is transfer-grade patience applied to a config check. Nobody iterates on setup at that speed. It fails in about 20 seconds now, or 40 if it has to try both schemes.
+
+- **`gsg` reported a missing dependency at runtime instead of install time.** `click` was imported but never declared, so a plain `pip install game-save-genie` produced `ModuleNotFoundError` on first run. CI could not have caught it: every job installed `.[dev]`, and `black` pulls in `click`. There is now a job that installs runtime dependencies only and imports every module. Thanks to [@EnduringGuerila](https://github.com/EnduringGuerila) for the fix. ([#20](https://github.com/Vasanthdev2004/Game-Save-Genie/pull/20), [#22](https://github.com/Vasanthdev2004/Game-Save-Genie/pull/22))
+
+- `gsg setup-s3` no longer announces "Railway S3 configured and verified" when connecting a homelab server.
+
+
+
 ## 0.6.0 — 2026-07-27
 
 The visible release: the app finally has a face, and the background watcher can tell you when something is wrong.

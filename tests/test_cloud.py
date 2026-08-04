@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from game_save_genie import cloud
@@ -140,3 +142,82 @@ def test_rclone_asset_error_points_at_the_workaround(
     monkeypatch.setattr(platform_module, "machine", lambda: "sparc")
     with pytest.raises(RuntimeError, match="checks PATH"):
         cloud._rclone_asset_name(_RCLONE_RELEASE)
+
+
+# --- S3 endpoint handling --------------------------------------------------
+# rclone assumes https for a scheme-less endpoint and, with path style off,
+# turns the bucket into a subdomain. Both defaults are wrong for a self-hosted
+# server, and together they made every possible input fail in #24.
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("http://host:9000", True),
+        ("https://host", True),
+        ("HTTP://HOST:9000", True),
+        ("host:9000", False),
+        ("192.168.1.10:9000", False),
+        ("localhost", False),
+        ("", False),
+    ],
+)
+def test_endpoint_scheme_detection(endpoint: str, expected: bool) -> None:
+    assert cloud.endpoint_has_scheme(endpoint) is expected
+
+
+def test_normalize_endpoint_strips_noise() -> None:
+    assert cloud.normalize_endpoint("  http://host:9000/  ") == "http://host:9000"
+
+
+def test_normalize_endpoint_applies_scheme_only_when_missing() -> None:
+    assert cloud.normalize_endpoint("host:9000", "http") == "http://host:9000"
+    # An explicit scheme is the user's decision and must survive.
+    assert cloud.normalize_endpoint("https://host", "http") == "https://host"
+
+
+def _written_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force_path_style: bool = True
+) -> dict[str, str]:
+    conf = tmp_path / "rclone.conf"
+    monkeypatch.setattr(cloud, "get_rclone_config_path", lambda: conf)
+    cloud.write_s3_config(
+        "homelab", "http://192.0.2.10:9000/", "k", "s", "saves",
+        force_path_style=force_path_style,
+    )
+    return cloud._read_rclone_config()["homelab"]
+
+
+def test_s3_config_defaults_to_path_style(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Subdomain addressing cannot work self-hosted: nothing resolves
+    saves.192.0.2.10, so path style is the only default that can succeed."""
+    assert _written_remote(tmp_path, monkeypatch)["force_path_style"] == "true"
+
+
+def test_s3_config_can_still_use_subdomain_addressing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Railway needs it off, so the choice has to stay reachable."""
+    remote = _written_remote(tmp_path, monkeypatch, force_path_style=False)
+    assert remote["force_path_style"] == "false"
+
+
+def test_s3_config_normalizes_the_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trailing slash becomes a double slash in the signed URL."""
+    assert _written_remote(tmp_path, monkeypatch)["endpoint"] == "http://192.0.2.10:9000"
+
+
+def test_s3_config_keeps_other_remotes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conf = tmp_path / "rclone.conf"
+    monkeypatch.setattr(cloud, "get_rclone_config_path", lambda: conf)
+    conf.write_text("[gdrive]\ntype = drive\n\n", encoding="utf-8")
+    cloud.write_s3_config("homelab", "http://host:9000", "k", "s", "saves")
+    sections = cloud._read_rclone_config()
+    assert sections["gdrive"]["type"] == "drive"
+    assert sections["homelab"]["type"] == "s3"
