@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2 — 2026-08-05
 
 ### Fixed
 - **Backups to Google Drive no longer pay an API call per directory.** Cloud saves are content-addressed, stored at `blobs/<hh>/<hash>`, which spreads one version across many directories; rclone walked source and destination in step and listed each one. Against a store holding 5000 blobs, a backup with nothing new to send went from 138 requests to 6. This is what made a first upload sit for minutes before moving any data. ([#26](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/26))
