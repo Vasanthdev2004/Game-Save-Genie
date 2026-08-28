@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3 — 2026-08-15
+
+### Fixed
+- **Autostart could fail at logon, or silently start nothing.** The Windows startup script was written as UTF-8, which Windows Script Host does not read. A UTF-8 byte order mark makes WSH refuse the file outright (`Invalid character`, 800A0408, line 1, char 1). Without a BOM it is read as the system ANSI codepage, which agrees with UTF-8 only while every character is ASCII — so a profile like `C:\Users\José` produced a startup script pointing at a path that does not exist, and because the script opens with `On Error Resume Next` it failed silently at every logon, with nothing logged. Now written as UTF-16LE with a BOM, which survives both cases.
+
+### Added
+- **[CLOUD_FORMAT.md](CLOUD_FORMAT.md) documents the cloud layout** so something other than `gsg` can read and write it: content-addressed blobs at `blobs/<hh>/<sha256>`, one JSON manifest per backup, every field, and the ordering rule that makes an interrupted upload safe. All of it reachable with rclone, `sha256sum` and a POSIX shell — for devices `gsg` itself cannot run on, such as a handheld with 128 MB of RAM. ([#32](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/32))
+
 ## 0.6.2 — 2026-08-05
 
 ### Fixed
