@@ -7,6 +7,8 @@ import logging
 import os
 import sys
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO
@@ -1065,6 +1067,7 @@ def watch(ctx: typer.Context) -> None:
     if lock is None:
         console.print("[red]Another gsg watcher is already running.[/red]")
         raise typer.Exit(1)
+    _LOCK_STATE["held"] = True  # this process is now the sole backup writer
 
     db = Database(get_data_dir() / "versions.db")
     ludusavi_path = (
@@ -1166,6 +1169,7 @@ def auto(
             raise typer.Exit(0)
         console.print(f"[red]{message}[/red]")
         raise typer.Exit(1)
+    _LOCK_STATE["held"] = True  # this process is now the sole backup writer
 
     # Scan for non-launcher (Hydra/manual) games
     from .launcher import detect_launcher, get_all_launcher_games
@@ -2191,6 +2195,14 @@ def _watchable_games(games: list[Game]) -> list[Game]:
     return watched
 
 
+# Set once a daemon has taken the instance lock for its lifetime, so the
+# per-backup guard below knows this process is already the sole writer and
+# does not warn about itself. A dict rather than a bare name because the two
+# daemons set it from their own scopes and rebinding a module global from
+# there is easy to misread.
+_LOCK_STATE = {"held": False}
+
+
 def _acquire_instance_lock() -> IO[str] | None:
     """Take an exclusive watcher lock; None if another instance holds it.
 
@@ -2218,6 +2230,42 @@ def _acquire_instance_lock() -> IO[str] | None:
     handle.write(str(os.getpid()))
     handle.flush()
     return handle
+
+
+@contextmanager
+def _backup_guard(action: str) -> Iterator[None]:
+    """Hold the instance lock for a one-shot command that writes backups.
+
+    `gsg auto` and `gsg watch` hold this for their whole lifetime. Everything
+    else -- `gsg backup`, `gsg restore`, `gsg pull`, and the dashboard, which
+    runs in its own process -- took nothing, so pressing 'b' in `gsg ui` while
+    the watcher ran its periodic backup had both writing the same
+    backup_dir/<game_id> while one of them zipped it. The resulting snapshot
+    passes its own hash check, because the digest is taken of the zip after it
+    is written and certifies the archive rather than the consistency of what
+    went into it (#38).
+
+    Yields whether or not the lock was free: refusing to back up because a
+    watcher is running would be worse than the race. The warning is the point,
+    and it names the other holder so the user can act on it.
+    """
+    if _LOCK_STATE["held"]:
+        # A daemon already owns the lock for its whole run; it is the writer.
+        yield
+        return
+    handle = _acquire_instance_lock()
+    if handle is None:
+        console.print(
+            f"[yellow]Another Game Save Genie process is writing backups. "
+            f"Doing this {action} anyway, but if it looks wrong, stop "
+            f"'gsg auto' and retry.[/yellow]"
+        )
+        yield
+        return
+    try:
+        yield
+    finally:
+        handle.close()
 
 
 def _snapshot_version(version: SaveVersion, config: SyncConfig) -> None:
@@ -2258,21 +2306,42 @@ def _run_backup(
     origin: str = "user",
     protect_id: str | None = None,
 ) -> BackupResult:
-    if game.custom:
-        previous = db.get_versions(game.id)
-        prev_digest = previous[0].content_digest if previous else None
-        result = custom.backup_custom(game, config.backup_dir, label, prev_digest)
-    else:
-        if ludusavi_path is None:
-            raise RuntimeError("Ludusavi path was not resolved for a non-custom backup")
-        result = backup_game(ludusavi_path, game, config.backup_dir, label)
+    # Every writer goes through here - the backup command, the safety backup
+    # taken before a restore, the dashboard in its own process, and the
+    # watcher. Guarding here rather than at each call site means no future
+    # caller can forget (#38).
+    with _backup_guard("backup"):
+        if game.custom:
+            previous = db.get_versions(game.id)
+            prev_digest = previous[0].content_digest if previous else None
+            result = custom.backup_custom(game, config.backup_dir, label, prev_digest)
+        else:
+            if ludusavi_path is None:
+                raise RuntimeError(
+                    "Ludusavi path was not resolved for a non-custom backup"
+                )
+            result = backup_game(ludusavi_path, game, config.backup_dir, label)
     if result.success and result.version:
         try:
             _snapshot_version(result.version, config)
         except OSError as exc:
+            # Storing the row anyway used to leave local_path pointing at the
+            # shared live directory with sha256 None. Every such row then
+            # aliased the same directory: `gsg versions` listed them as
+            # distinct restore points that all restored the newest content,
+            # and an upload sent whatever the directory held at upload time
+            # (#38). A backup we cannot snapshot is a failed backup.
+            logging.getLogger(__name__).error(
+                "Snapshot failed for %s: %s", game.title, exc
+            )
             console.print(
-                f"[yellow]Snapshot failed for {game.title}: {exc}. "
-                f"Version will reference the live backup directory.[/yellow]"
+                f"[red]Snapshot failed for {game.title}: {exc}. "
+                f"This backup was NOT recorded.[/red]"
+            )
+            return BackupResult(
+                success=False,
+                game_id=game.id,
+                message=f"Snapshot failed: {exc}",
             )
         result.version.origin = origin
         db.add_version(result.version)
@@ -2393,8 +2462,13 @@ def _cloud_upload(
 
     db = Database(get_data_dir() / "versions.db")
     db.mark_cloud_synced(version.id, result.remote_path)
+    # protect_id matters when this machine's clock disagrees with another's.
+    # Version ids are wall-clock strings and retention sorts them, so an
+    # upload from a slow-clocked machine sorts oldest and would be deleted by
+    # the prune that immediately follows its own upload (#36).
     pruned = prune_remote_versions(
-        rclone_path, game, remote_name, config.remote_root, keep=config.max_versions
+        rclone_path, game, remote_name, config.remote_root,
+        keep=config.max_versions, protect_id=version.id,
     )
     if pruned:
         console.print(f"[dim]Pruned {len(pruned)} old cloud version(s).[/dim]")

@@ -113,6 +113,12 @@ class BackupResult(BaseModel):
     version: SaveVersion | None = None
     message: str
     files_changed: int = 0
+    # Save roots that were configured but were not on disk when this backup
+    # ran. The backup still succeeds - the other roots are worth keeping -
+    # but it covered less than the user asked for, and retention will
+    # eventually prune the last version that did cover them (#37). Empty on
+    # every healthy backup.
+    missing_roots: list[str] = Field(default_factory=list)
 
 
 class RestoreResult(BaseModel):

@@ -904,17 +904,29 @@ def list_remote_versions(
 
 
 def select_entries_to_prune(
-    entries: list[tuple[str, str]], keep: int
+    entries: list[tuple[str, str]], keep: int, protect_id: str | None = None
 ) -> list[tuple[str, str]]:
-    """Pick the oldest remote entries beyond ``keep``, newest always retained.
+    """Pick the oldest remote entries beyond ``keep``.
 
     Pure so the retention policy is unit-testable. Version ids are UTC
-    timestamps, so lexicographic order equals chronological order.
+    timestamps, so lexicographic order equals chronological order -- but only
+    among ids written by clocks that agree. They frequently do not: a machine
+    with an RTC offset stamps ids that sort as old no matter when they were
+    written, and this function cannot tell those apart from genuinely old
+    ones.
+
+    ``protect_id`` is how the caller says "not this one, I just wrote it".
+    Without it, an upload from a slow-clocked machine sorts to the bottom and
+    is deleted by the prune that follows its own upload (#36). The local
+    prune has always taken this argument; the cloud prune did not.
     """
     if keep < 1 or len(entries) <= keep:
         return []
     ordered = sorted(entries, key=lambda pair: pair[0])
-    return ordered[: len(ordered) - keep]
+    doomed = ordered[: len(ordered) - keep]
+    if protect_id is None:
+        return doomed
+    return [pair for pair in doomed if pair[0] != protect_id]
 
 
 def prune_remote_versions(
@@ -923,12 +935,17 @@ def prune_remote_versions(
     remote_name: str,
     remote_root: str,
     keep: int,
+    protect_id: str | None = None,
 ) -> list[str]:
     """Delete the oldest cloud versions beyond ``keep`` for a game.
 
-    Fail-safe by design: if the remote listing fails nothing is deleted, the
-    newest version is never deleted, and individual delete failures are
-    logged but never raised. Returns the version ids actually deleted.
+    Fail-safe by design: if the remote listing fails nothing is deleted,
+    ``protect_id`` is never deleted, and individual delete failures are logged
+    but never raised. Returns the version ids actually deleted.
+
+    Callers that have just uploaded should pass that version as
+    ``protect_id``. "Newest" here means highest-sorting id, which is not the
+    same as most recently written when two machines disagree about the time.
     """
     try:
         entries = list_remote_version_entries(binary, game, remote_name, remote_root)
@@ -937,7 +954,7 @@ def prune_remote_versions(
         return []
     deleted: list[str] = []
     removed_cas = False
-    for version_id, raw_entry in select_entries_to_prune(entries, keep):
+    for version_id, raw_entry in select_entries_to_prune(entries, keep, protect_id):
         kind = entry_kind(raw_entry)
         if kind == "zipdir":
             # Legacy uncompressed/nested upload: a directory tree.

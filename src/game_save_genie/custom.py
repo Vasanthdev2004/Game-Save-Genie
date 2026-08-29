@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 from collections.abc import Iterator
@@ -26,6 +27,8 @@ from pathlib import Path
 
 from .archive import sha256_file
 from .models import BackupResult, Game, SaveVersion
+
+logger = logging.getLogger(__name__)
 
 MANIFEST_NAME = "gsg-custom.json"
 MANIFEST_FORMAT = "gsg-custom-1"
@@ -100,6 +103,7 @@ def backup_custom(
     game_backup_dir.mkdir(parents=True, exist_ok=True)
 
     roots_meta: list[dict[str, object]] = []
+    missing_roots: list[str] = []
     for index, save_path in enumerate(game.save_paths):
         root = save_path.path
         dest = game_backup_dir / ROOTS_DIR / str(index)
@@ -113,6 +117,14 @@ def backup_custom(
             shutil.copytree(root, dest, dirs_exist_ok=True)
             roots_meta.append({"index": index, "original": str(root), "type": "dir"})
         else:
+            # Configured but not on disk: an unmounted drive, or a folder the
+            # user moved. Recording it silently meant every later backup
+            # reported success while covering less, until retention pruned the
+            # last version that still held this root (#37).
+            missing_roots.append(str(root))
+            logger.warning(
+                "Save location missing for %s, not backed up: %s", game.id, root
+            )
             roots_meta.append({"index": index, "original": str(root), "type": "missing"})
 
     manifest = {"format": MANIFEST_FORMAT, "game_id": game.id, "roots": roots_meta}
@@ -131,9 +143,12 @@ def backup_custom(
         platform=game.platform,
         content_digest=digest,
     )
+    message = f"Backed up {file_count} file(s) ({_human_size(total_bytes)})"
+    if missing_roots:
+        message += f" - {len(missing_roots)} save location(s) missing and NOT backed up"
     return BackupResult(
         success=True, game_id=game.id, version=version, files_changed=file_count,
-        message=f"Backed up {file_count} file(s) ({_human_size(total_bytes)})",
+        message=message, missing_roots=missing_roots,
     )
 
 
