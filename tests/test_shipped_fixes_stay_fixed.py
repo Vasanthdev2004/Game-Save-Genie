@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import codecs
 import inspect
+import os
 from pathlib import Path
 
 import pytest
@@ -29,11 +30,20 @@ def test_startup_script_is_written_as_utf16_bytes() -> None:
     assert "write_text" not in source
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="_install_startup writes a systemd unit off Windows, not a .vbs",
+)
 def test_installed_startup_file_really_begins_with_a_utf16_bom(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The same fix from the other end: run the real installer and read the
-    bytes, so this survives a rewrite that keeps the helper but drops it."""
+    bytes, so this survives a rewrite that keeps the helper but drops it.
+
+    Windows only, and deliberately so: on Linux this function installs a
+    systemd user service into the real ~/.config, which a test has no
+    business doing. The structural assertion above covers both platforms.
+    """
     target = tmp_path / "Startup" / "GameSaveGenie.vbs"
     monkeypatch.setattr(cli, "_startup_vbs_path", lambda: target)
     monkeypatch.setattr(cli, "_find_gsg_exe", lambda: tmp_path / "gsg.exe")
