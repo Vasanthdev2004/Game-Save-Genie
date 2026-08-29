@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from game_save_genie.models import Game, Platform, ProcessInfo
 from game_save_genie.watcher import (
     GameWatcher,
@@ -384,3 +386,87 @@ def test_stop_before_the_loop_starts_is_honoured() -> None:
     watcher.script = [{} for _ in range(10)]
     watcher.stop()
     watcher.watch_loop(interval=30.0)  # returns immediately, does not sleep
+
+
+# --- POSIX system processes and Proton (#40) -------------------------------
+# The watcher was inverted on Linux: OS daemons matched as games, and no
+# Proton game matched at all. Every case below was executed against the real
+# functions before the fix and behaved the wrong way round.
+
+
+@pytest.mark.parametrize(
+    "exe",
+    [
+        "/usr/libexec/xdg-desktop-portal",
+        "/usr/bin/gnome-control-center",
+        "/usr/lib/systemd/systemd",
+        "/usr/sbin/cupsd",
+        "/bin/bash",
+        "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
+        "C:/Windows/System32/svchost.exe",
+    ],
+)
+def test_operating_system_processes_are_never_games(exe: str) -> None:
+    assert is_system_executable(exe)
+
+
+@pytest.mark.parametrize(
+    "exe",
+    [
+        "/home/deck/.steam/steamapps/common/Portal 2/portal2.sh",
+        "/opt/games/Control/control.x86_64",
+        "/mnt/sdcard/roms/game.bin",
+        "D:/Games/Cyberpunk 2077/bin/x64/Cyberpunk2077.exe",
+    ],
+)
+def test_real_game_locations_are_not_excluded(exe: str) -> None:
+    """The exclusion must be prefix-anchored. A game under /home, /opt or a
+    mounted drive shares no prefix with the OS directories."""
+    assert not is_system_executable(exe)
+
+
+def test_xdg_desktop_portal_does_not_match_portal() -> None:
+    """The reported case. It also gets learned into games.yaml, so one match
+    poisons that game's config permanently and reports it forever running."""
+    assert not title_matches_process(
+        "xdg-desktop-portal", "/usr/libexec/xdg-desktop-portal", "Portal"
+    )
+    assert not title_matches_process(
+        "xdg-desktop-portal", "/usr/libexec/xdg-desktop-portal", "Portal 2"
+    )
+
+
+def test_gnome_control_center_does_not_match_control() -> None:
+    assert not title_matches_process(
+        "gnome-control-center", "/usr/bin/gnome-control-center", "Control"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "loader", "title"),
+    [
+        (
+            "portal2.exe",
+            "/home/deck/.steam/steamapps/common/Proton - Experimental/files/bin/wine64-preloader",
+            "Portal 2",
+        ),
+        (
+            "Cyberpunk2077.exe",
+            "/home/deck/.local/share/Steam/steamapps/common/Proton 8.0/files/bin/wine",
+            "Cyberpunk 2077",
+        ),
+    ],
+)
+def test_a_proton_game_is_matched_by_its_process_name(
+    name: str, loader: str, title: str
+) -> None:
+    """Under Proton the executable path is the wine loader, so the title
+    appears nowhere in it. The process name is the only evidence there is,
+    and it used to be discarded."""
+    assert title_matches_process(name, loader, title)
+
+
+def test_the_process_name_does_not_become_a_loose_match() -> None:
+    """Adding the name as evidence must not weaken the whole-token rules."""
+    assert not title_matches_process("python3", "/home/deck/scripts/run.sh", "Portal 2")
+    assert not title_matches_process("mono", "/opt/mono/bin/mono", "Control")

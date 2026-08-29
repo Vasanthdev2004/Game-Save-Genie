@@ -20,6 +20,31 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install
         run: pip install -e ".[dev]"
+
+      # Without rclone on the runner, tests/test_cloud_cas.py skips whole -
+      # and that file is the only place upload_save_cas, download_save_cas,
+      # prune_remote_versions and gc_blobs are exercised. The functions that
+      # can DELETE a save had strictly less CI coverage than the ones that
+      # already shipped four hotfixes (#44). The tests use a local remote, so
+      # any rclone build will do; no credentials are involved.
+      - name: Install rclone (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rclone
+      - name: Install rclone (Windows)
+        if: runner.os == 'Windows'
+        run: choco install rclone -y --no-progress
+      - name: Confirm the cloud tests are not silently skipping
+        shell: bash
+        run: |
+          rclone version
+          # A skip here is the failure mode this step exists to prevent, so
+          # make it loud rather than letting the suite report green.
+          pytest tests/test_cloud_cas.py -q -rs --no-header | tee /tmp/cas.txt
+          if grep -q "skipped" /tmp/cas.txt; then
+            echo "::error::cloud tests skipped despite rclone being installed"
+            exit 1
+          fi
+
       - name: Lint
         run: ruff check src tests
       - name: Type check

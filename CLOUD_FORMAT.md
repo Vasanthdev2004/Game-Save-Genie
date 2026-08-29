@@ -7,10 +7,35 @@ This exists because `gsg` cannot run everywhere saves live. It is Python, and
 a Miyoo Mini+ running OnionOS has 128 MB of RAM and a BusyBox userland
 ([#32](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/32)). But
 rclone runs there, and everything below is reachable with rclone, `sha256sum`
-and a POSIX shell. A device that writes this layout gets restores on the
-desktop for free, because `gsg` cannot tell the difference.
+and a POSIX shell.
 
 Treat this as a contract. Changes to it will be versioned, not silent.
+
+## What this does and does not get you today
+
+An earlier version of this page said a device writing this layout "gets
+restores on the desktop for free, because `gsg` cannot tell the difference".
+That was wrong, and it is corrected here rather than quietly deleted, because
+someone may have built against it.
+
+`gsg` can tell the difference. Every restore is gated on
+`_staged_backup_has_content`, which requires a Ludusavi `mapping.yaml` inside
+the restored tree for a normal game, or the custom-game manifest for a custom
+one. A backup written from this document alone carries neither, so the blobs
+and the manifest land in the bucket correctly and `gsg pull` then refuses
+them.
+
+So what a device gets right now is **storage that gsg understands**: the
+objects are valid, deduplicated against everything gsg has uploaded, listed by
+`gsg cloud-list`, and safe from the garbage collector. What it does not yet
+get is a one-command restore on the desktop.
+
+Making a CAS manifest sufficient on its own is tracked in
+[#43](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/43). It is the
+right end state — `cas.reconstruct` already verifies every blob against its
+hash, which is a stronger check than the file-presence test that currently
+gates restores — but it is not done, and this page should not have implied it
+was.
 
 ## Layout
 

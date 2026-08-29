@@ -34,7 +34,11 @@ def test_user_path_remap_noop_cases() -> None:
     assert remap_windows_user_path("C:/Users/Public/x", "bob") == "C:/Users/Public/x"
     assert remap_windows_user_path("C:/Users/Default/x", "bob") == "C:/Users/Default/x"
     assert remap_windows_user_path("D:/Games/Skyrim/saves", "bob") == "D:/Games/Skyrim/saves"
-    assert remap_windows_user_path("/home/alice/.config/game", "bob") == "/home/alice/.config/game"
+    # A POSIX home used to be a no-op here, which is precisely the bug in
+    # #42: a Steam Deck restoring onto a desktop wrote the save under the
+    # other machine's home. It now remaps, so this case moved to
+    # test_a_linux_home_is_remapped below.
+    assert remap_windows_user_path("/var/lib/thing", "bob") == "/var/lib/thing"
 
 
 def test_user_path_remap_only_touches_profile_segment() -> None:
@@ -303,3 +307,47 @@ def test_wine_to_windows_remap() -> None:
     remapped = remap_paths(game, mapping, target_platform=Platform.WINDOWS)
     assert len(remapped) == 1
     assert str(remapped[0].path).startswith("C:")
+
+
+# --- POSIX homes (#42) -----------------------------------------------------
+# Only Windows drive-letter paths were matched, so a Linux-to-Linux pull was a
+# silent no-op: the restore reported success and wrote the save under the
+# other machine's home path.
+
+
+def test_a_linux_home_is_remapped() -> None:
+    assert (
+        remap_windows_user_path("/home/deck/.local/share/Terraria/Players", "alice")
+        == "/home/alice/.local/share/Terraria/Players"
+    )
+
+
+def test_a_macos_home_is_remapped() -> None:
+    assert (
+        remap_windows_user_path("/Users/deck/Library/Application Support/x", "alice")
+        == "/Users/alice/Library/Application Support/x"
+    )
+
+
+def test_a_windows_path_still_remaps() -> None:
+    assert (
+        remap_windows_user_path("C:/Users/alice/Saved Games/x", "bob")
+        == "C:/Users/bob/Saved Games/x"
+    )
+
+
+def test_the_same_user_is_left_alone() -> None:
+    assert remap_windows_user_path("/home/alice/x", "alice") == "/home/alice/x"
+
+
+def test_a_home_deeper_in_the_tree_is_not_a_profile() -> None:
+    """Anchored at the root: a game installed under /opt/games/home/... has a
+    'home' segment that means nothing."""
+    assert (
+        remap_windows_user_path("/opt/games/home/data/x", "alice")
+        == "/opt/games/home/data/x"
+    )
+
+
+def test_a_path_with_no_profile_segment_is_untouched() -> None:
+    assert remap_windows_user_path("/var/lib/thing", "alice") == "/var/lib/thing"

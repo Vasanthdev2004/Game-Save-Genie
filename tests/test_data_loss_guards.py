@@ -165,3 +165,62 @@ def test_the_guard_is_a_noop_for_a_daemon_that_already_holds_the_lock(
     monkeypatch.setattr(cli, "_acquire_instance_lock", explode)
     with cli._backup_guard("backup"):
         pass
+
+
+# --- silent failures (#41) -------------------------------------------------
+
+
+def test_a_game_with_no_save_files_is_a_failure_not_a_no_op() -> None:
+    """"No changes detected" and "I found nothing to back up" are different
+    outcomes. Sharing a message told a user whose saves had moved that
+    everything was fine, every session, indefinitely."""
+    import json
+    from unittest.mock import patch
+
+    from game_save_genie.ludusavi import backup_game
+
+    game = Game(id="g", title="Gone Game", platform=Platform.WINDOWS,
+                shop="steam", shop_object_id="1")
+    empty_scan = type("R", (), {"stdout": json.dumps({"games": {"Gone Game": {"files": {}}}})})()
+    with patch("game_save_genie.ludusavi.run_ludusavi", return_value=empty_scan):
+        result = backup_game(Path("ludusavi"), game, Path("backups"))
+    assert not result.success
+    assert "no save files found" in result.message.lower()
+
+
+def test_a_callback_failure_is_reported_not_only_logged() -> None:
+    """The loop must survive, but a failed close-backup used to leave the tray
+    on the green "Playing" state with only a stack trace in a log file."""
+    from game_save_genie.watcher import GameWatcher
+
+    watcher = GameWatcher([])
+    seen: list[str] = []
+    watcher.set_on_error(seen.append)
+
+    def boom() -> None:
+        raise RuntimeError("upload exploded")
+
+    watcher._safe_callback(boom)
+    assert seen and "upload exploded" in seen[0]
+
+
+def test_a_watcher_without_a_reporter_still_survives_a_failing_callback() -> None:
+    """on_error is optional; its absence must not turn a swallowed error into
+    a crash in the loop that runs unattended from boot."""
+    from game_save_genie.watcher import GameWatcher
+
+    def boom() -> None:
+        raise RuntimeError("nope")
+
+    GameWatcher([])._safe_callback(boom)  # must not raise
+
+
+def test_gsg_auto_reports_watcher_errors_to_the_tray() -> None:
+    """Wiring: the reporter has to be attached, not merely available."""
+    import inspect
+
+    from game_save_genie import cli
+
+    source = inspect.getsource(cli.auto)
+    assert "set_on_error" in source
+    assert "STATE_ERROR" in source

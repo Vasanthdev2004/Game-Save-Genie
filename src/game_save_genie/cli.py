@@ -1362,6 +1362,20 @@ def auto(
     if periodic > 0:
         watcher.set_on_periodic_backup(on_periodic)
     watcher.set_on_idle_check(on_idle)
+
+    def on_watch_error(message: str) -> None:
+        """A callback raised. The loop survives; the user must still hear it.
+
+        Without this a failed close-backup left the tray on the green
+        "Playing" state set when the game started, and the only record was a
+        stack trace in a log file nobody opens (#41).
+        """
+        log.error("%s", message)
+        console.print(f"[red]{message}[/red]")
+        tray.escalate(tray_mod.STATE_ERROR, message)
+        alert("Backup FAILED", message)
+
+    watcher.set_on_error(on_watch_error)
     watcher.prime()
 
     console.print("[cyan]Checking cloud for newer saves...[/cyan]")

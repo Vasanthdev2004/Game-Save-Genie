@@ -87,12 +87,51 @@ def is_helper_executable(name: str) -> bool:
     return any(marker in slug for marker in _HELPER_PROCESS_MARKERS)
 
 
+# Directories that hold the operating system rather than anything anyone
+# plays. Checked as path prefixes so a game installed under /home, /opt, a
+# mounted drive or a Steam library is never caught by them.
+#
+# This list existed only for Windows, which meant that off Windows NOTHING was
+# excluded: /usr/libexec/xdg-desktop-portal matched the title "Portal", the
+# name was learned into games.yaml, and the game then read as permanently
+# running - which silently disabled its cloud restore (#40).
+_SYSTEM_PATH_PREFIXES = (
+    "c:/windows/",
+    "/usr/bin/",
+    "/usr/sbin/",
+    "/usr/lib/",
+    "/usr/libexec/",
+    "/usr/share/",
+    "/bin/",
+    "/sbin/",
+    "/lib/",
+    "/lib64/",
+    "/etc/",
+    "/proc/",
+    "/sys/",
+    "/system/",              # macOS /System
+    "/library/",             # macOS /Library, not ~/Library
+    "/applications/utilities/",
+    "/private/var/",
+)
+
+
 def is_system_executable(exe: str | None) -> bool:
-    """Return True for OS/system processes that should never match a game."""
+    """Return True for OS/system processes that should never match a game.
+
+    A false negative here is expensive in a way that is easy to miss: a
+    matched process name is *learned* and written to games.yaml, so one OS
+    daemon matching a game title poisons that game's configuration
+    permanently and reports it as forever running.
+    """
     if not exe:
         return False
     normalized = exe.lower().replace("\\", "/")
-    return "/windows/" in normalized
+    # Windows is matched anywhere in the path because a drive letter varies
+    # and Ludusavi paths embed it as "drive-C/Windows/...".
+    if "/windows/" in normalized:
+        return True
+    return normalized.startswith(_SYSTEM_PATH_PREFIXES)
 
 
 def title_matches_process(name: str, exe: str | None, title: str) -> bool:
@@ -109,8 +148,13 @@ def title_matches_process(name: str, exe: str | None, title: str) -> bool:
     negative only means the game is never detected, which `gsg auto` and
     `gsg status` now report so it can be fixed with `--exe`.
 
-    Bare process names without a path never match, and system executables
-    never match.
+    System executables never match. The reported process *name* is weighed as
+    one more segment, under the same whole-token rules as the path: under
+    Proton the executable path is the wine loader inside the Proton runtime,
+    so the game's title appears nowhere in it and the name is the only
+    evidence there is (#40). The name alone was previously discarded, which
+    made every Proton title undetectable while native Linux games worked -
+    a failure that looks random rather than systematic.
     """
     if is_system_executable(exe) or not exe:
         return False
@@ -120,7 +164,13 @@ def title_matches_process(name: str, exe: str | None, title: str) -> bool:
         return False
 
     joined = "".join(keywords)
-    for segment in exe.replace("\\", "/").split("/"):
+    # The name is appended, not substituted: a path segment is still the
+    # stronger signal, and the per-segment rules below are what keep a short
+    # or generic name from claiming a game.
+    segments = exe.replace("\\", "/").split("/")
+    if name:
+        segments.append(name)
+    for segment in segments:
         if not segment:
             continue
         segment_tokens = set(_tokens(segment))
@@ -169,7 +219,9 @@ class GameWatcher:
     launcher, anti-cheat, or crash handler beside the main executable, so a
     game counts as closed only when no matching process remains. Callback
     exceptions are logged and swallowed: one failing backup must never kill
-    a watcher that runs unattended from boot.
+    a watcher that runs unattended from boot -- but they are also reported
+    through ``on_error``, because a watcher that survives silently is
+    indistinguishable from one that is working.
     """
 
     def __init__(
@@ -193,6 +245,12 @@ class GameWatcher:
         self.on_game_start: Callable[[Game, ProcessInfo], None] | None = None
         self.on_periodic_backup: Callable[[Game], None] | None = None
         self.on_idle_check: Callable[[Game], None] | None = None
+        # Called when a callback raises. Without it a failed close-backup was
+        # a log line nobody reads while the tray still showed "Playing" (#41).
+        self.on_error: Callable[[str], None] | None = None
+
+    def set_on_error(self, callback: Callable[[str], None]) -> None:
+        self.on_error = callback
 
     def set_on_game_close(self, callback: Callable[[Game, ProcessInfo], None]) -> None:
         self.on_game_close = callback
@@ -342,11 +400,25 @@ class GameWatcher:
                 break
 
     def _safe_callback(self, callback: Callable[..., None], *args: Any) -> None:
-        """Run a callback without letting its failure kill the watch loop."""
+        """Run a callback without letting its failure kill the watch loop.
+
+        The loop must survive, but the user must hear about it. An exception
+        here means the close-backup never ran, and the tray was still showing
+        the green "Playing" state set when the game started - weeks of
+        failures looking exactly like everything working (#41). ``on_error``
+        is what surfaces it; a watcher constructed without one keeps the old
+        log-only behaviour.
+        """
         try:
             callback(*args)
-        except Exception:
+        except Exception as exc:
             logger.exception("Watcher callback failed")
+            if self.on_error is not None:
+                try:
+                    self.on_error(f"Backup step failed: {exc}")
+                except Exception:
+                    # The reporter itself failing must not kill the loop.
+                    logger.exception("Watcher error reporter failed")
 
     def _first_process_info(self, pids: set[int]) -> ProcessInfo | None:
         for pid in sorted(pids):

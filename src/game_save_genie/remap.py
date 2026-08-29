@@ -16,22 +16,45 @@ from .models import Game, GameSavePath, Platform
 _SHARED_PROFILES = {"public", "default", "default user", "all users"}
 
 
-def remap_windows_user_path(path_str: str, current_user: str) -> str:
-    """Rewrite ONLY the user-profile segment directly after the drive root.
+# Windows: C:/Users/<profile>/rest
+_WINDOWS_PROFILE = re.compile(r"^([A-Za-z]:)[/\\](Users)[/\\]([^/\\]+)((?:[/\\].*)?)$")
+# POSIX: /home/<user>/rest, and macOS /Users/<user>/rest. Anchored at the root
+# so a game installed at /opt/games/home/... is never touched.
+_POSIX_PROFILE = re.compile(r"^/(home|Users)/([^/\\]+)((?:[/\\].*)?)$")
 
-    ``C:/Users/alice/Saved Games/x`` -> ``C:/Users/<current>/Saved Games/x``.
+
+def remap_windows_user_path(path_str: str, current_user: str) -> str:
+    """Rewrite ONLY the user-profile segment directly after the root.
+
+    ``C:/Users/alice/Saved Games/x`` -> ``C:/Users/<current>/Saved Games/x``
+    ``/home/deck/.local/share/x``    -> ``/home/<current>/.local/share/x``
+
     Deeper ``users`` path segments (e.g. ``C:/Games/users/data``) and shared
-    profiles (Public, Default) are left untouched. Output uses forward
+    Windows profiles (Public, Default) are left untouched. Output uses forward
     slashes, matching Ludusavi's mapping.yaml key format.
+
+    The POSIX half was missing, so a Steam Deck (``deck``) restoring onto a
+    desktop (``alice``) reported success and wrote the save under the other
+    machine's home path (#42) - the exact cross-machine story the README
+    sells. The name is kept for compatibility; it is no longer Windows-only.
     """
-    match = re.match(r"^([A-Za-z]:)[/\\](Users)[/\\]([^/\\]+)((?:[/\\].*)?)$", path_str)
-    if not match:
-        return path_str
-    profile = match.group(3)
-    if profile.lower() == current_user.lower() or profile.lower() in _SHARED_PROFILES:
-        return path_str
-    rest = (match.group(4) or "").replace("\\", "/")
-    return f"{match.group(1)}/{match.group(2)}/{current_user}{rest}"
+    match = _WINDOWS_PROFILE.match(path_str)
+    if match:
+        profile = match.group(3)
+        if profile.lower() == current_user.lower() or profile.lower() in _SHARED_PROFILES:
+            return path_str
+        rest = (match.group(4) or "").replace("\\", "/")
+        return f"{match.group(1)}/{match.group(2)}/{current_user}{rest}"
+
+    match = _POSIX_PROFILE.match(path_str)
+    if match:
+        root, profile = match.group(1), match.group(2)
+        if profile.lower() == current_user.lower() or profile.lower() in _SHARED_PROFILES:
+            return path_str
+        rest = (match.group(3) or "").replace("\\", "/")
+        return f"/{root}/{current_user}{rest}"
+
+    return path_str
 
 
 def current_profile_name() -> str:

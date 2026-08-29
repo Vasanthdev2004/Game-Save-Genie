@@ -28,7 +28,7 @@ Game Save Genie runs quietly in the background and gives you what the launchers 
 - 🔔 **Tells you when something breaks** — a tray icon shows at a glance whether your saves are safe (and goes red, with a notification, if a backup or upload fails) instead of failing silently in the background
 - 🕰️ **Every session is a version** — immutable, checksummed snapshots; roll back to any point with `gsg restore --version`
 - ☁️ **Your own cloud** — Google Drive (free 15 GB), OneDrive, any S3 bucket, or [anything rclone speaks](https://rclone.org/overview/); retention is enforced so it never fills up, and **delta uploads** only send the save files that changed (an unchanged 40 MB slot is never re-uploaded)
-- 🖥️ **Follows you between PCs** — `gsg pull` restores on any machine, remapping paths saved under a different Windows username
+- 🖥️ **Follows you between PCs** — `gsg pull` restores on any machine, remapping paths saved under a different username on Windows, Linux or macOS
 - 🔒 **Paranoid by design** — downloads are verified before anything is touched, a safety backup is taken before every restore, restores never run while the game is, and a strictly-newer rule means offline progress is never clobbered
 
 Steam/Epic/Xbox games are detected and skipped automatically — those launchers already sync their own saves.
@@ -51,7 +51,7 @@ Once you're set up, running `gsg` again opens the **dashboard** — your games, 
 
 **Homelab?** Run your own save server with one `docker compose up` and connect it with `gsg setup-s3` — see [docker/README.md](docker/README.md). Works with any S3-compatible store (MinIO, Garage, TrueNAS…), supports per-friend accounts, and your saves never leave your network.
 
-**Somewhere `gsg` can't run?** The cloud layout is documented in [CLOUD_FORMAT.md](CLOUD_FORMAT.md) — content-addressed blobs plus a small JSON manifest per backup, reachable with rclone and `sha256sum` from a shell script. A handheld or NAS that writes that layout gets restores on the desktop for free.
+**Somewhere `gsg` can't run?** The cloud layout is documented in [CLOUD_FORMAT.md](CLOUD_FORMAT.md) — content-addressed blobs plus a small JSON manifest per backup, reachable with rclone and `sha256sum` from a shell script. A handheld or NAS that writes that layout produces storage gsg understands and deduplicates against; a one-command restore from a device-written backup is not there yet ([#43](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/43)).
 
 > **Status:** single-machine backup on Windows is stable and used daily. Cross-machine sync (`gsg pull`) and Linux/Steam Deck support are **beta** — solid in testing, but not yet battle-tested across many real setups. Keep a second copy of anything precious for now, and please [file an issue](https://github.com/Vasanthdev2004/Game-Save-Genie/issues) with anything you hit — that feedback is what moves it out of beta.
 

@@ -265,6 +265,25 @@ def backup_game(
     files_changed = sum(
         1 for f in files_data.values() if f.get("change") in ("New", "Different")
     )
+    if not files_data:
+        # Ludusavi found the game but no save files at all. That is not "no
+        # changes" - it usually means the saves moved, the drive is not
+        # mounted, or the game was uninstalled. Reporting success here told a
+        # user with a relocated save that everything was fine, every session,
+        # indefinitely (#41).
+        logger.warning(
+            "No save files found for %s; nothing was backed up", game.title
+        )
+        return BackupResult(
+            success=False,
+            game_id=game.id,
+            message=(
+                f"No save files found for {game.title}. The saves may have "
+                f"moved, or the drive may not be mounted."
+            ),
+            files_changed=0,
+        )
+
     if files_changed == 0:
         return BackupResult(
             success=True,

@@ -13,6 +13,19 @@ from game_save_genie.models import CloudProvider, Game, Platform, SaveVersion, S
 runner = CliRunner()
 
 
+def _recent_cloud_version() -> str:
+    """A cloud version id that is newer than anything local but not absurd.
+
+    A hardcoded far-future id used to serve here, until #39 started refusing
+    ids stamped more than a day ahead as evidence of a broken clock.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime(
+        "%Y%m%d-%H%M%S-%f"
+    )
+
+
 def test_bare_gsg_shows_help_when_not_a_tty(tmp_path: Path) -> None:
     """Non-interactive bare invocation must print help, never hang on a wizard
     and never launch the dashboard into a pipe."""
@@ -244,7 +257,7 @@ def test_pull_dry_run_reports_newer_cloud_version(
     monkeypatch.setattr("game_save_genie.cli.GameWatcher", _IdleWatcher)
     monkeypatch.setattr(
         "game_save_genie.cli.list_remote_versions",
-        lambda *a, **k: ["20990101-000000-000000"],
+        lambda *a, **k: [_recent_cloud_version()],
     )
     monkeypatch.setattr("game_save_genie.cli.get_rclone_path", lambda p: Path("rclone"))
     monkeypatch.setattr("game_save_genie.cli.get_ludusavi_path", lambda p: Path("ludusavi"))
@@ -254,7 +267,7 @@ def test_pull_dry_run_reports_newer_cloud_version(
     )
     assert result.exit_code == 0
     assert "Would restore" in result.output
-    assert "20990101-000000-000000" in result.output
+    assert _recent_cloud_version()[:8] in result.output
 
 
 def test_pull_listing_failure_exits_nonzero(tmp_path: Path, monkeypatch: object) -> None:
