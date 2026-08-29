@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,70 @@ from .models import BackupResult, Game, GameSavePath, Platform, SaveVersion
 logger = logging.getLogger(__name__)
 
 LUDUSAVI_RELEASES_URL = "https://api.github.com/repos/mtkennerly/ludusavi/releases/latest"
+
+
+def _ludusavi_manifest_path() -> Path:
+    """Where Ludusavi keeps the game manifest it downloads."""
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "ludusavi" / "manifest.yaml"
+
+
+def titles_without_save_data(titles: set[str]) -> set[str]:
+    """Of ``titles``, the ones Ludusavi knows hold no save data.
+
+    A manifest entry tags every path it lists: ``save``, ``config``, and so
+    on. Roblox's entry, for instance, is two files both tagged ``config`` -
+    graphics and control preferences - because Roblox keeps progress on the
+    account. Backing that up produces versions of a settings file (#47).
+
+    The scan API does not report tags, only ``change`` and ``bytes``, so the
+    tags have to come from the manifest.
+
+    Deliberately conservative. A title is returned only when its entry lists
+    file paths and NONE of them is tagged ``save``. An entry with no tags, a
+    title that is absent, or an unreadable manifest all yield nothing, so the
+    caller behaves exactly as it did before. This must never withhold a
+    backup on a guess; it may only decline to start one we know is pointless.
+
+    Parsed line by line rather than with a YAML loader: the manifest is over
+    half a million lines, and this runs on the scan path.
+    """
+    if not titles:
+        return set()
+    manifest = _ludusavi_manifest_path()
+    try:
+        lines = manifest.read_bytes().decode("utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        logger.debug("Could not read Ludusavi manifest at %s: %s", manifest, exc)
+        return set()
+
+    wanted = {f"{title}:": title for title in titles}
+    found: set[str] = set()
+    index = 0
+    total = len(lines)
+    while index < total:
+        title = wanted.get(lines[index].rstrip())
+        if title is None:
+            index += 1
+            continue
+        end = index + 1
+        while end < total and (not lines[end] or lines[end][0].isspace()):
+            end += 1
+        block = lines[index:end]
+        has_files = any(line.strip() == "files:" for line in block)
+        # An entry that tags nothing tells us nothing. Requiring at least one
+        # tag is what keeps "no save tag" from meaning "no tags at all".
+        has_any_tag = any(line.strip() == "tags:" for line in block)
+        has_save_tag = any(line.strip() == "- save" for line in block)
+        if has_files and has_any_tag and not has_save_tag:
+            found.add(title)
+        index = end
+    return found
 
 
 def get_ludusavi_path(config_path: Path | None = None) -> Path:

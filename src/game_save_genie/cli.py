@@ -51,6 +51,7 @@ from .ludusavi import (
     preview_backup,
     restore_from_backup,
     scan_games,
+    titles_without_save_data,
 )
 from .models import (
     BackupResult,
@@ -1186,11 +1187,31 @@ def auto(
     existing_titles = {g.title for g in existing_games}
     new_games: list[Game] = []
 
+    # Ludusavi's manifest tags each path save/config/etc, but the scan API
+    # does not report tags - so ask the manifest which candidates hold no save
+    # data at all. Roblox is two files, both tagged config, because progress
+    # lives on the account; tracking it produced ten versions of a settings
+    # file (#47).
+    candidate_titles = {
+        title
+        for title, info in games_data.items()
+        if detect_launcher(
+            title, list(info.get("files", {}).keys()),
+            steam_games, epic_games, xbox_games,
+        ) == "other"
+    }
+    config_only = titles_without_save_data(candidate_titles)
+    if config_only:
+        console.print(
+            f"[dim]Skipped {len(config_only)} game(s) with no save data of "
+            f"their own: {', '.join(sorted(config_only))}.[/dim]"
+        )
+
     for title, info in games_data.items():
         files = info.get("files", {})
         save_paths = list(files.keys())
         detected = detect_launcher(title, save_paths, steam_games, epic_games, xbox_games)
-        if detected != "other":
+        if auto_add_skip_reason(title, detected, config_only) is not None:
             continue
 
         game_id = _slugify(title)
@@ -1205,6 +1226,25 @@ def auto(
             auto_sync=True,
         )
         new_games.append(game)
+
+    # Ownership was decided when each game was first seen and never revisited.
+    # Epic writes a manifest per INSTALLED game, so a title that was not
+    # installed during the first scan is invisible to detect_launcher and stays
+    # tracked forever, duplicating a launcher's own cloud sync (#48). Report
+    # rather than act: removing a game deletes backups on the strength of a
+    # heuristic that has already proven fragile, and keeping a second copy of a
+    # launcher-synced game is a legitimate choice.
+    for game in existing_games:
+        owner = detect_launcher(
+            game.title, [str(p.path) for p in game.save_paths],
+            steam_games, epic_games, xbox_games,
+        )
+        if owner != "other":
+            console.print(
+                f"[yellow]{game.title} is now installed through "
+                f"{owner.capitalize()}, which syncs its own saves.[/yellow] "
+                f"[dim]'gsg remove {game.id}' to stop duplicating it.[/dim]"
+            )
 
     if new_games:
         all_games = existing_games + new_games
@@ -2691,6 +2731,26 @@ def _record_applied_cloud_version(db: Database, game_id: str, version_id: str) -
     current = db.get_sync_state(game_id)
     if current is None or version_id > current:
         db.update_sync_state(game_id, version_id)
+
+
+def auto_add_skip_reason(
+    title: str, detected_launcher: str, config_only: set[str]
+) -> str | None:
+    """Why auto-add should leave this game alone, or None to track it.
+
+    A predicate rather than two inline conditions so the rule can be tested
+    directly. Both reasons are things gsg knows and the user does not, and
+    both used to be silent: a launcher-managed game is already synced by its
+    launcher, and a config-only game has no save data to protect (#47, #48).
+
+    Neither reason applies to an explicit ``gsg add``. Someone who wants their
+    settings versioned, or a second copy of a Steam save, is entitled to it.
+    """
+    if detected_launcher != "other":
+        return f"managed by {detected_launcher}"
+    if title in config_only:
+        return "no save data of its own"
+    return None
 
 
 def _slugify(text: str) -> str:
