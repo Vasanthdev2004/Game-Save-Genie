@@ -1,5 +1,130 @@
 # Changelog
 
+## 0.7.0 — 2026-08-29
+
+A correctness release. No new features: this is the result of auditing the
+paths that can lose a save rather than the paths that fail to write one, after
+four consecutive patch releases fixed bugs that a single external user found
+and CI did not.
+
+Most of these were silent. That is the common thread, and the reason for a
+minor version rather than another patch — a backup tool that reports success
+while doing nothing is worse than one that crashes.
+
+### Fixed — data loss
+
+- **Cloud retention could delete the version it had just uploaded.** Version
+  ids are wall-clock timestamps and retention sorts them as strings, so an
+  upload from a machine whose clock runs behind sorted oldest and was deleted
+  by the prune that ran immediately after its own upload. The tray went green,
+  `gsg versions` reported `Cloud = yes`, and the object was gone. Permanent for
+  anyone with an RTC offset — a Steam Deck, a dual-boot PC, a VM. The local
+  prune had always protected the version being written; the cloud prune now
+  does too. ([#36](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/36))
+- **A save location that had gone missing was recorded silently.** An unmounted
+  drive or a moved folder became a metadata note, while the backup reported
+  `Backed up 40 file(s)` in green and covered less than you asked for.
+  Retention then pruned the versions that still held the missing folder — at
+  ten versions and a backup every ten minutes of play, that does not take long.
+  It is now named in the result, logged, and shown.
+  ([#37](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/37))
+- **Two backups running at once could produce a snapshot that verified clean
+  and restored a half-written save tree.** Only `gsg watch` and `gsg auto` took
+  the instance lock; `gsg backup`, `gsg restore`, `gsg pull` and the dashboard
+  — which runs in its own process — took nothing. The archive's checksum is
+  taken after it is written, so it certifies the archive, not the consistency
+  of what went into it. Every backup path now goes through one guard. A
+  snapshot that fails also no longer records a version at all: it used to store
+  a row still pointing at the live directory, so several "distinct" restore
+  points all restored the newest content.
+  ([#38](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/38))
+- **One machine with a wrong clock could stall cross-machine sync
+  permanently.** A version stamped years ahead became "the newest save" on
+  every other machine forever, so `gsg pull` reported "already up to date" with
+  no way back short of editing the bucket by hand. Cloud versions stamped more
+  than a day ahead are refused now, with the reason logged.
+  ([#39](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/39))
+
+### Fixed — Linux
+
+- **The watcher was inverted.** System processes were excluded only by a
+  Windows path check, so on Linux nothing was excluded at all:
+  `/usr/libexec/xdg-desktop-portal` matched a game called *Portal*, and that
+  match was then learned and written to `games.yaml` permanently — leaving the
+  game reported as forever running, which silently disabled its cloud restore.
+  In the other direction, the process name was collected and never read, so
+  under Proton, where the executable path is the Wine loader, no game was
+  detected at all. Native Linux games worked, which made the failure look
+  random rather than systematic. Both halves are fixed.
+  ([#40](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/40))
+- **Cross-machine restore did not remap Linux or macOS home directories.** Only
+  Windows `C:/Users/<name>` paths were rewritten, so a Steam Deck restoring
+  onto a desktop reported success and wrote the save under the other machine's
+  home. ([#42](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/42))
+
+### Fixed — silent failures
+
+- **A game whose saves had moved reported "No changes detected since last
+  backup".** Indistinguishable from success, every session, indefinitely. An
+  empty scan is a failure now, and says what probably happened.
+  ([#41](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/41))
+- **An error during the close-backup was logged and swallowed** while the tray
+  still showed the green "Playing" state. It turns the tray red and fires a
+  notification now.
+  ([#41](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/41))
+
+### Changed
+
+- **Games with no save data of their own are no longer added automatically.**
+  Ludusavi tags each path it knows as `save`, `config` and so on, and gsg
+  ignored the tags — so a game like Roblox, whose only known files are graphics
+  and control preferences because progress lives on the account, became a
+  tracked game with ten retained versions of a 4 KiB settings file. Explicit
+  `gsg add` is unaffected.
+  ([#47](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/47))
+- **Launcher ownership is re-checked at every scan, not only when a game is
+  first seen.** Epic records a manifest per installed game, so a title that
+  happened to be uninstalled during the first scan was invisible to the check
+  and stayed tracked forever, duplicating Epic's own cloud sync. gsg reports it
+  and leaves the decision to you.
+  ([#48](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/48))
+
+### Fixed — tests and CI
+
+- **CI could not catch a regression in any function that deletes a cloud
+  save.** The end-to-end cloud tests skip when rclone is missing and no job
+  installed it, so `upload_save_cas`, `download_save_cas`,
+  `prune_remote_versions` and `gc_blobs` had never run on a runner. rclone is
+  installed on every leg now, and a skip in that module is a hard failure.
+  ([#44](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/44))
+- **Every fix shipped in 0.6.1 through 0.6.3 was pinned at the helper and not
+  at the call site**, so reverting the production wiring left the suite green
+  and a refactor could have silently undone any of them. All are pinned where
+  they are used now, and each was mutation-tested by reverting it and
+  confirming the suite goes red.
+  ([#44](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/44))
+
+### Documentation
+
+- `CLOUD_FORMAT.md` claimed that a device writing the documented layout "gets
+  restores on the desktop for free". It does not: every restore is gated on a
+  Ludusavi `mapping.yaml` or the custom-game manifest, and a content-addressed
+  upload carries neither. The claim is corrected in place rather than deleted,
+  because it was published and may have been acted on. What a device does get
+  — valid, deduplicated, GC-safe storage — is stated plainly now.
+  ([#43](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/43))
+- The README no longer describes cross-machine remapping as Windows-only,
+  because it no longer is.
+
+### Notes
+
+The test suite went from 229 tests to 295.
+
+Nothing here changes how a working install behaves. If your backups have been
+running and restoring correctly, this release is insurance rather than repair
+— but the failures it fixes were, by construction, ones you would not have
+noticed.
+
 ## 0.6.3 — 2026-08-15
 
 ### Fixed
