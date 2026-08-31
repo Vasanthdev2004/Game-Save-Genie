@@ -149,3 +149,199 @@ def test_an_ordinary_game_is_tracked() -> None:
 def test_a_config_only_title_owned_by_a_launcher_reports_the_launcher() -> None:
     """Both reasons apply; the launcher one is the more useful thing to say."""
     assert cli.auto_add_skip_reason("Roblox", "steam", {"Roblox"}) == "managed by steam"
+
+
+# --- native cloud support (#51) --------------------------------------------
+# Ludusavi's manifest records which stores sync a game's saves themselves.
+# This is about what the GAME supports, never about what YOUR copy is covered
+# by - a repack of a Steam Cloud game is synced by nothing.
+
+_CLOUD_MANIFEST = """\
+Cyberpunk 2077:
+  cloud:
+    epic: true
+    gog: true
+    steam: true
+  files:
+    "<winLocalAppData>/CD Projekt Red/Cyberpunk 2077":
+      tags:
+        - save
+Half Cloud Game:
+  cloud:
+    steam: true
+    gog: false
+  files:
+    "<home>/x":
+      tags:
+        - save
+No Cloud Game:
+  files:
+    "<home>/y":
+      tags:
+        - save
+Unknown Store Game:
+  cloud:
+    nintendo: true
+  files:
+    "<home>/z":
+      tags:
+        - save
+Indent Trap Game:
+  cloud:
+    gog: true
+  installDir:
+    steam: true
+  files:
+    "<home>/w":
+      tags:
+        - save
+"""
+
+
+@pytest.fixture()
+def cloud_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "manifest.yaml"
+    path.write_text(_CLOUD_MANIFEST, encoding="utf-8")
+    monkeypatch.setattr(
+        "game_save_genie.ludusavi._ludusavi_manifest_path", lambda: path
+    )
+    return path
+
+
+def test_every_true_store_is_reported(cloud_manifest: Path) -> None:
+    from game_save_genie.ludusavi import cloud_platforms_for_titles
+
+    assert cloud_platforms_for_titles({"Cyberpunk 2077"}) == {
+        "Cyberpunk 2077": {"epic", "gog", "steam"}
+    }
+
+
+def test_a_store_recorded_false_is_not_reported(cloud_manifest: Path) -> None:
+    from game_save_genie.ludusavi import cloud_platforms_for_titles
+
+    assert cloud_platforms_for_titles({"Half Cloud Game"}) == {
+        "Half Cloud Game": {"steam"}
+    }
+
+
+def test_a_game_with_no_cloud_block_is_absent_not_empty(cloud_manifest: Path) -> None:
+    """Absent and empty must stay distinguishable: "we do not know" is not
+    the same claim as "no store syncs this"."""
+    from game_save_genie.ludusavi import cloud_platforms_for_titles
+
+    assert cloud_platforms_for_titles({"No Cloud Game"}) == {}
+
+
+def test_an_unrecognised_store_is_ignored(cloud_manifest: Path) -> None:
+    """Only stores we actually know about are reported, rather than passing
+    through whatever the manifest happens to contain."""
+    from game_save_genie.ludusavi import cloud_platforms_for_titles
+
+    assert cloud_platforms_for_titles({"Unknown Store Game"}) == {}
+
+
+def test_the_cloud_block_stops_at_its_own_indent(cloud_manifest: Path) -> None:
+    """A later key inside the same entry can carry a name that matches a
+    store. Only the cloud block may be read, so this game is gog-only despite
+    an installDir called steam."""
+    from game_save_genie.ludusavi import cloud_platforms_for_titles
+
+    assert cloud_platforms_for_titles({"Indent Trap Game"}) == {
+        "Indent Trap Game": {"gog"}
+    }
+
+
+def test_a_missing_manifest_reports_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from game_save_genie.ludusavi import cloud_platforms_for_titles
+
+    monkeypatch.setattr(
+        "game_save_genie.ludusavi._ludusavi_manifest_path",
+        lambda: tmp_path / "nope.yaml",
+    )
+    assert cloud_platforms_for_titles({"Cyberpunk 2077"}) == {}
+
+
+def test_no_titles_reads_no_manifest_for_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    from game_save_genie.ludusavi import cloud_platforms_for_titles
+
+    def explode() -> Path:
+        raise AssertionError("manifest read for an empty title set")
+
+    monkeypatch.setattr("game_save_genie.ludusavi._ludusavi_manifest_path", explode)
+    assert cloud_platforms_for_titles(set()) == {}
+
+
+def test_scan_rejects_an_unknown_store() -> None:
+    """A typo must not silently filter nothing."""
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(cli.app, ["scan", "--skip-cloud-synced", "nintendo"])
+    assert result.exit_code == 1
+    assert "Unknown store" in result.output
+
+
+def _run_scan(
+    monkeypatch: pytest.MonkeyPatch, manifest: Path, *args: str
+) -> str:
+    """Drive the real scan command over a controlled manifest and game list."""
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(
+        "game_save_genie.ludusavi._ludusavi_manifest_path", lambda: manifest
+    )
+    monkeypatch.setattr("game_save_genie.cli.get_ludusavi_path", lambda p: Path("lud"))
+    monkeypatch.setattr(
+        "game_save_genie.cli.scan_games",
+        lambda p: {
+            "games": {
+                "Cyberpunk 2077": {"files": {"a": {"bytes": 1}}},
+                "No Cloud Game": {"files": {"b": {"bytes": 1}}},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "game_save_genie.launcher.get_all_launcher_games",
+        lambda: (set(), set(), set()),
+    )
+    result = CliRunner().invoke(cli.app, ["scan", "--source", "all", *args])
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
+def test_a_cloud_synced_game_is_shown_when_you_do_not_ask_to_hide_it(
+    cloud_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The filter must never be a default. gsg exists for copies no store
+    syncs - a repack of a Steam Cloud game - and hiding on capability would
+    silently drop exactly those."""
+    output = _run_scan(monkeypatch, cloud_manifest)
+    assert "Cyberpunk 2077" in output
+    assert "No Cloud Game" in output
+
+
+def test_asking_to_hide_steam_hides_only_the_steam_synced_game(
+    cloud_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = _run_scan(monkeypatch, cloud_manifest, "--skip-cloud-synced", "steam")
+    assert "Cyberpunk 2077" not in output
+    assert "No Cloud Game" in output
+
+
+def test_hiding_a_store_the_game_does_not_use_hides_nothing(
+    cloud_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cyberpunk is on epic/gog/steam but not uplay."""
+    output = _run_scan(monkeypatch, cloud_manifest, "--skip-cloud-synced", "uplay")
+    assert "Cyberpunk 2077" in output
+
+
+def test_native_cloud_is_reported_without_being_asked(
+    cloud_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Knowing Steam already covers a game is useful even when you want gsg
+    to cover it too."""
+    output = _run_scan(monkeypatch, cloud_manifest)
+    assert "Native Cloud" in output
+    assert "steam" in output

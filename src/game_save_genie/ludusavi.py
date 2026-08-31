@@ -33,6 +33,88 @@ def _ludusavi_manifest_path() -> Path:
     return base / "ludusavi" / "manifest.yaml"
 
 
+# Stores whose own cloud sync Ludusavi's manifest records. Anything outside
+# this set in a manifest entry is ignored rather than guessed at.
+CLOUD_PLATFORMS = ("steam", "epic", "gog", "origin", "uplay")
+
+
+def _manifest_lines() -> list[str] | None:
+    """The manifest as lines, or None when it cannot be read.
+
+    Read as bytes and decoded leniently: the manifest carries game titles from
+    every locale, and one undecodable byte should not cost the whole lookup.
+    """
+    manifest = _ludusavi_manifest_path()
+    try:
+        return manifest.read_bytes().decode("utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        logger.debug("Could not read Ludusavi manifest at %s: %s", manifest, exc)
+        return None
+
+
+def _entry_blocks(lines: list[str], titles: set[str]) -> dict[str, list[str]]:
+    """The manifest block for each requested title that is present."""
+    wanted = {f"{title}:": title for title in titles}
+    blocks: dict[str, list[str]] = {}
+    index = 0
+    total = len(lines)
+    while index < total:
+        title = wanted.get(lines[index].rstrip())
+        if title is None:
+            index += 1
+            continue
+        end = index + 1
+        while end < total and (not lines[end] or lines[end][0].isspace()):
+            end += 1
+        blocks[title] = lines[index:end]
+        index = end
+    return blocks
+
+
+def cloud_platforms_for_titles(titles: set[str]) -> dict[str, set[str]]:
+    """Which stores sync each title's saves natively, per Ludusavi's manifest.
+
+    A manifest entry may carry a ``cloud:`` block naming the stores that
+    provide their own save sync, e.g. ``cloud: {steam: true}``. Only stores
+    recorded as true are returned; a title with no cloud block is absent from
+    the result rather than mapped to an empty set, so "unknown" and "none"
+    stay distinguishable.
+
+    This says the GAME supports a store's cloud sync. It does not say YOUR
+    copy is synced by it: a repack, a GOG offline installer or a Hydra install
+    of a Steam-Cloud game is covered by nothing. That distinction is the whole
+    reason gsg exists, so callers must treat this as information to offer and
+    never as grounds to stop protecting something on their own initiative
+    (#51).
+    """
+    if not titles:
+        return {}
+    lines = _manifest_lines()
+    if lines is None:
+        return {}
+
+    found: dict[str, set[str]] = {}
+    for title, block in _entry_blocks(lines, titles).items():
+        try:
+            cloud_at = next(i for i, line in enumerate(block) if line.strip() == "cloud:")
+        except StopIteration:
+            continue
+        indent = len(block[cloud_at]) - len(block[cloud_at].lstrip())
+        platforms: set[str] = set()
+        for line in block[cloud_at + 1:]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if len(line) - len(line.lstrip()) <= indent:
+                break
+            key, _, value = stripped.partition(":")
+            if key in CLOUD_PLATFORMS and value.strip() == "true":
+                platforms.add(key)
+        if platforms:
+            found[title] = platforms
+    return found
+
+
 def titles_without_save_data(titles: set[str]) -> set[str]:
     """Of ``titles``, the ones Ludusavi knows hold no save data.
 
@@ -55,26 +137,12 @@ def titles_without_save_data(titles: set[str]) -> set[str]:
     """
     if not titles:
         return set()
-    manifest = _ludusavi_manifest_path()
-    try:
-        lines = manifest.read_bytes().decode("utf-8", errors="replace").splitlines()
-    except OSError as exc:
-        logger.debug("Could not read Ludusavi manifest at %s: %s", manifest, exc)
+    lines = _manifest_lines()
+    if lines is None:
         return set()
 
-    wanted = {f"{title}:": title for title in titles}
     found: set[str] = set()
-    index = 0
-    total = len(lines)
-    while index < total:
-        title = wanted.get(lines[index].rstrip())
-        if title is None:
-            index += 1
-            continue
-        end = index + 1
-        while end < total and (not lines[end] or lines[end][0].isspace()):
-            end += 1
-        block = lines[index:end]
+    for title, block in _entry_blocks(lines, titles).items():
         has_files = any(line.strip() == "files:" for line in block)
         # An entry that tags nothing tells us nothing. Requiring at least one
         # tag is what keeps "no save tag" from meaning "no tags at all".
@@ -82,7 +150,6 @@ def titles_without_save_data(titles: set[str]) -> set[str]:
         has_save_tag = any(line.strip() == "- save" for line in block)
         if has_files and has_any_tag and not has_save_tag:
             found.add(title)
-        index = end
     return found
 
 

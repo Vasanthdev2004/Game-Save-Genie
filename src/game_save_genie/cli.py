@@ -46,7 +46,9 @@ from .config import (
 )
 from .database import Database
 from .ludusavi import (
+    CLOUD_PLATFORMS,
     backup_game,
+    cloud_platforms_for_titles,
     get_ludusavi_path,
     preview_backup,
     restore_from_backup,
@@ -268,8 +270,25 @@ def scan(
         "--source",
         help="Filter by launcher: 'hydra' (non-Steam/Epic/Xbox), 'all', 'steam', 'epic', 'xbox'",
     ),
+    skip_cloud_synced: str | None = typer.Option(
+        None,
+        "--skip-cloud-synced",
+        metavar="STORES",
+        help=(
+            "Hide games the given stores sync themselves, e.g. 'steam' or "
+            "'steam,gog'. This is about what the GAME supports, not what YOUR "
+            "copy is covered by: a repack or an offline installer of a "
+            "Steam Cloud game is synced by nothing."
+        ),
+    ),
 ) -> None:
-    """Scan for installed games and their save locations."""
+    """Scan for installed games and their save locations.
+
+    The Native Cloud column reports which stores provide their own save sync
+    for each game, from Ludusavi's manifest. It is shown whether or not you
+    filter on it, because knowing Steam already covers a game is useful even
+    when you want gsg to cover it too.
+    """
     from .launcher import detect_launcher, get_all_launcher_games
 
     config_path = ctx.obj.get("config_path")
@@ -284,9 +303,24 @@ def scan(
     # Detect launcher for each game
     steam_games, epic_games, xbox_games = get_all_launcher_games()
 
+    skip_stores: set[str] = set()
+    if skip_cloud_synced:
+        skip_stores = {s.strip().lower() for s in skip_cloud_synced.split(",") if s.strip()}
+        unknown = skip_stores - set(CLOUD_PLATFORMS)
+        if unknown:
+            console.print(
+                f"[red]Unknown store(s): {', '.join(sorted(unknown))}.[/red] "
+                f"[dim]Known: {', '.join(CLOUD_PLATFORMS)}.[/dim]"
+            )
+            raise typer.Exit(1)
+
+    native_cloud = cloud_platforms_for_titles(set(games_data))
+    skipped_for_cloud = 0
+
     table = Table(title="Detected Games")
     table.add_column("Title")
     table.add_column("Source")
+    table.add_column("Native Cloud")
     table.add_column("Files")
     table.add_column("Size")
 
@@ -314,15 +348,27 @@ def scan(
         elif detected != source:
             continue
 
+        synced_by = native_cloud.get(title, set())
+        if skip_stores & synced_by:
+            skipped_for_cloud += 1
+            continue
+
         color = source_colors.get(detected, "white")
         table.add_row(
             title,
             f"[{color}]{detected}[/{color}]",
+            ", ".join(sorted(synced_by)) if synced_by else "[dim]-[/dim]",
             str(len(files)),
             _human_size(size),
         )
 
     console.print(table)
+    if skipped_for_cloud:
+        console.print(
+            f"[dim]Hid {skipped_for_cloud} game(s) synced by "
+            f"{', '.join(sorted(skip_stores))}. This reflects what the game "
+            f"supports, not what your copy is covered by.[/dim]"
+        )
     if source != "all":
         console.print(
             f"[dim]Filtered by source: {source}. Use --source all to see every game.[/dim]"
