@@ -273,13 +273,36 @@ def test_no_titles_reads_no_manifest_for_cloud(monkeypatch: pytest.MonkeyPatch) 
     assert cloud_platforms_for_titles(set()) == {}
 
 
-def test_scan_rejects_an_unknown_store() -> None:
-    """A typo must not silently filter nothing."""
+def test_scan_rejects_an_unknown_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo must not silently filter nothing.
+
+    Checked with no games found, because that is where the original ordering
+    was wrong: validation ran after the scan, so a machine with nothing
+    installed returned 0 and never mentioned the bad flag. CI has no games,
+    which is how this surfaced.
+    """
     from typer.testing import CliRunner
+
+    monkeypatch.setattr("game_save_genie.cli.get_ludusavi_path", lambda p: Path("lud"))
+    monkeypatch.setattr("game_save_genie.cli.scan_games", lambda p: {"games": {}})
 
     result = CliRunner().invoke(cli.app, ["scan", "--skip-cloud-synced", "nintendo"])
     assert result.exit_code == 1
     assert "Unknown store" in result.output
+
+
+def test_a_bad_store_is_rejected_before_the_scan_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo should not cost a full Ludusavi scan first."""
+    from typer.testing import CliRunner
+
+    def explode(_: object) -> None:
+        raise AssertionError("scanned before validating the flag")
+
+    monkeypatch.setattr("game_save_genie.cli.get_ludusavi_path", explode)
+    result = CliRunner().invoke(cli.app, ["scan", "--skip-cloud-synced", "nintendo"])
+    assert result.exit_code == 1
 
 
 def _run_scan(

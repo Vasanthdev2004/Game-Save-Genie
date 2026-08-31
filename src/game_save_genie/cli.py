@@ -291,6 +291,17 @@ def scan(
     """
     from .launcher import detect_launcher, get_all_launcher_games
 
+    skip_stores: set[str] = set()
+    if skip_cloud_synced:
+        skip_stores = {s.strip().lower() for s in skip_cloud_synced.split(",") if s.strip()}
+        unknown = skip_stores - set(CLOUD_PLATFORMS)
+        if unknown:
+            console.print(
+                f"[red]Unknown store(s): {', '.join(sorted(unknown))}.[/red] "
+                f"[dim]Known: {', '.join(CLOUD_PLATFORMS)}.[/dim]"
+            )
+            raise typer.Exit(1)
+
     config_path = ctx.obj.get("config_path")
     ludusavi_path = get_ludusavi_path(config_path)
     console.print("[cyan]Scanning for games with Ludusavi...[/cyan]")
@@ -302,17 +313,6 @@ def scan(
 
     # Detect launcher for each game
     steam_games, epic_games, xbox_games = get_all_launcher_games()
-
-    skip_stores: set[str] = set()
-    if skip_cloud_synced:
-        skip_stores = {s.strip().lower() for s in skip_cloud_synced.split(",") if s.strip()}
-        unknown = skip_stores - set(CLOUD_PLATFORMS)
-        if unknown:
-            console.print(
-                f"[red]Unknown store(s): {', '.join(sorted(unknown))}.[/red] "
-                f"[dim]Known: {', '.join(CLOUD_PLATFORMS)}.[/dim]"
-            )
-            raise typer.Exit(1)
 
     native_cloud = cloud_platforms_for_titles(set(games_data))
     skipped_for_cloud = 0
