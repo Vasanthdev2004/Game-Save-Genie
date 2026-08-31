@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.8.1 — 2026-08-31
+
+Two halves of one gap in what "automatic" actually covered. Both were found on
+a real install, and both are the kind that leave saves unprotected without
+anything appearing to be wrong.
+
+### Fixed
+
+- **A game installed after the watcher started was invisible to it.** `gsg
+  auto` scanned for games once, before it began watching, and never scanned
+  again. On a machine that stays up for a week, a week of newly installed games
+  went untracked and unbacked with no warning anywhere. It now rescans while it
+  runs, every six hours by default — set `rescan_interval_hours` to change it,
+  or 0 to switch it off. A rescan that finds nothing says nothing; one that
+  finds a game announces it and starts watching immediately, without disturbing
+  any game already running.
+  ([#54](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/54))
+
+- **A newly tracked game's existing saves were never backed up.** Both backup
+  triggers are about playing — on game close, and periodically while a game
+  runs — so neither reached a game gsg had only just discovered. It printed
+  "run `gsg backup` yourself" to a console that `gsg auto --install` hides, and
+  did nothing. Those saves now get a first backup as soon as the game is
+  tracked, with each game attempted independently so one failure cannot strand
+  the rest or stop the watcher starting.
+  ([#55](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/55))
+
+  Between them, this is what left a 28 MB save file tracked, visible in `gsg
+  status`, and backed up nowhere, for a full day.
+
+### What you will notice
+
+The first time the watcher starts after updating, it backs up every tracked
+game that has no versions yet. If you have several, that is a burst of first
+backups rather than the usual quiet start. It happens once per game.
+
 ## 0.8.0 — 2026-08-31
 
 ### Added
