@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.8.0 — 2026-08-31
+
+### Added
+
+- **`gsg scan` now shows which stores sync each game themselves.** A new Native
+  Cloud column reports whether Steam, GOG, Epic, Origin or Uplay provide their
+  own save sync for a game, read from Ludusavi's manifest:
+
+  ```
+  | Title            | Source | Native Cloud     | Files | Size      |
+  | Apex Legends     | steam  | origin, steam    | 3     | 12.29 KiB |
+  | Cyberpunk 2077   | other  | epic, gog, steam | 66    | 79.09 MiB |
+  | Human: Fall Flat | steam  | -                | 17    | 4.24 MiB  |
+  ```
+
+  It is shown whether or not you ask to filter on it, because knowing Steam
+  already covers a game is useful even when you want gsg to cover it too.
+  ([#51](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/51), requested
+  by [@Tudzer](https://github.com/Tudzer))
+
+- **`gsg scan --skip-cloud-synced steam,gog`** hides the games those stores
+  already cover, and reports how many it hid. An unrecognised store name is
+  rejected before the scan runs rather than silently filtering nothing.
+
+  This is opt-in and will stay opt-in. The manifest records what the **game**
+  supports, not what **your copy** is covered by — a repack, a GOG offline
+  installer or a Hydra install of a Steam Cloud game is synced by nothing, and
+  those are exactly the saves gsg exists to protect. Filtering on capability by
+  default would drop precisely them, without saying so.
+
+### Notes
+
+Implemented by reading Ludusavi's manifest rather than by driving Ludusavi's
+own cloud filter, which would have meant writing to a config file you own and
+leaving it modified if gsg died mid-scan. gsg already reads that manifest for
+the save-tag check added in 0.7.0, so this is the same pass over the same file.
+
 ## 0.7.0 — 2026-08-29
 
 A correctness release. No new features: this is the result of auditing the
