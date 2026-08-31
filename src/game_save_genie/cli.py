@@ -7,7 +7,7 @@ import logging
 import os
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1145,6 +1145,166 @@ def watch(ctx: typer.Context) -> None:
         lock.close()
 
 
+def protect_unbacked_games(
+    games: list[Game],
+    config: SyncConfig,
+    config_path: Path | None,
+    db: Database,
+    ludusavi_path: Path | None,
+    report: Callable[[Game, BackupResult, bool | None], None],
+) -> list[str]:
+    """Back up every game that has no versions yet. Returns those still without.
+
+    A game gsg has just discovered has saves on disk right now, and neither
+    backup trigger reaches them: backups fire when a game closes, or
+    periodically while one runs. So a newly tracked game stayed unprotected
+    until the user happened to play it again, while `gsg status` printed
+    "run gsg backup yourself" into a console that `gsg auto --install` hides
+    and the tray stayed green (#55).
+
+    One game failing must not leave the rest unprotected, and must not stop
+    the watcher starting, so each is attempted independently.
+    """
+    unprotected = [g for g in games if not db.get_versions(g.id)]
+    if not unprotected:
+        return []
+
+    console.print(
+        f"[cyan]Protecting {len(unprotected)} game(s) that have never been "
+        f"backed up...[/cyan]"
+    )
+    still: list[str] = []
+    for index, game in enumerate(unprotected, 1):
+        console.print(f"[dim]  ({index}/{len(unprotected)}) {game.title}[/dim]")
+        try:
+            result = _run_backup(
+                game, config, db, None if game.custom else ludusavi_path,
+                label="First backup",
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "First backup failed for %s", game.title
+            )
+            console.print(f"[red]  {game.title}: {exc}[/red]")
+            still.append(game.title)
+            continue
+        if result.success and result.version:
+            uploaded = _cloud_upload(config_path, game, result.version, dry_run=False)
+            report(game, result, uploaded)
+        else:
+            report(game, result, None)
+            still.append(game.title)
+    return still
+
+
+def discover_new_games(
+    config: SyncConfig,
+    config_path: Path | None,
+    ludusavi_path: Path,
+    *,
+    quiet: bool = False,
+) -> list[Game]:
+    """Scan for games gsg is not tracking yet, add them, and return them.
+
+    Extracted from `gsg auto`, which used to do this once at startup and never
+    again. A game installed while the watcher ran was invisible until the next
+    reboot, so on a machine that stays up for a week that is a week of saves
+    nobody was protecting (#54). The watch loop now calls this on a timer, and
+    `quiet` keeps a routine rescan that finds nothing from printing anything.
+
+    Also re-checks launcher ownership of games already tracked (#48), and
+    skips titles whose only known paths are settings (#47).
+    """
+    from .launcher import detect_launcher, get_all_launcher_games
+
+    def say(message: str) -> None:
+        if not quiet:
+            console.print(message)
+
+    say("[cyan]Scanning for Hydra/manual games...[/cyan]")
+    data = scan_games(ludusavi_path)
+    games_data = data.get("games", {})
+    steam_games, epic_games, xbox_games = get_all_launcher_games()
+
+    existing_games = load_games(config_path)
+    existing_ids = {g.id for g in existing_games}
+    existing_titles = {g.title for g in existing_games}
+    new_games: list[Game] = []
+
+    # Ludusavi's manifest tags each path save/config/etc, but the scan API
+    # does not report tags - so ask the manifest which candidates hold no save
+    # data at all. Roblox is two files, both tagged config, because progress
+    # lives on the account; tracking it produced ten versions of a settings
+    # file (#47).
+    candidate_titles = {
+        title
+        for title, info in games_data.items()
+        if detect_launcher(
+            title, list(info.get("files", {}).keys()),
+            steam_games, epic_games, xbox_games,
+        ) == "other"
+    }
+    config_only = titles_without_save_data(candidate_titles)
+    if config_only:
+        say(
+            f"[dim]Skipped {len(config_only)} game(s) with no save data of "
+            f"their own: {', '.join(sorted(config_only))}.[/dim]"
+        )
+
+    for title, info in games_data.items():
+        files = info.get("files", {})
+        save_paths = list(files.keys())
+        detected = detect_launcher(title, save_paths, steam_games, epic_games, xbox_games)
+        if auto_add_skip_reason(title, detected, config_only) is not None:
+            continue
+
+        game_id = _slugify(title)
+        if not game_id or game_id in existing_ids or title in existing_titles:
+            continue
+
+        game = Game(
+            id=game_id,
+            title=title,
+            platform=_current_platform(),
+            cloud_provider=config.cloud_provider or CloudProvider.S3,
+            auto_sync=True,
+        )
+        new_games.append(game)
+
+    # Ownership was decided when each game was first seen and never revisited.
+    # Epic writes a manifest per INSTALLED game, so a title that was not
+    # installed during the first scan is invisible to detect_launcher and stays
+    # tracked forever, duplicating a launcher's own cloud sync (#48). Report
+    # rather than act: removing a game deletes backups on the strength of a
+    # heuristic that has already proven fragile, and keeping a second copy of a
+    # launcher-synced game is a legitimate choice.
+    for game in existing_games:
+        owner = detect_launcher(
+            game.title, [str(sp.path) for sp in game.save_paths],
+            steam_games, epic_games, xbox_games,
+        )
+        if owner != "other":
+            say(
+                f"[yellow]{game.title} is now installed through "
+                f"{owner.capitalize()}, which syncs its own saves.[/yellow] "
+                f"[dim]'gsg remove {game.id}' to stop duplicating it.[/dim]"
+            )
+
+    if new_games:
+        save_games(existing_games + new_games, config_path)
+        # Always announced, even on a quiet rescan: finding a new game is the
+        # whole point of running one.
+        console.print(f"[green]Auto-added {len(new_games)} game(s):[/green]")
+        for added in new_games:
+            console.print(f"  - {added.title}")
+        logger_names = ", ".join(g.title for g in new_games)
+        logging.getLogger(__name__).info("Auto-added games: %s", logger_names)
+    else:
+        say("[dim]No new games found. Using existing tracked games.[/dim]")
+
+    return new_games
+
+
 @app.command()
 def auto(
     ctx: typer.Context,
@@ -1218,88 +1378,8 @@ def auto(
         raise typer.Exit(1)
     _LOCK_STATE["held"] = True  # this process is now the sole backup writer
 
-    # Scan for non-launcher (Hydra/manual) games
-    from .launcher import detect_launcher, get_all_launcher_games
-
-    console.print("[cyan]Scanning for Hydra/manual games...[/cyan]")
     ludusavi_path = get_ludusavi_path(config_path)
-    data = scan_games(ludusavi_path)
-    games_data = data.get("games", {})
-    steam_games, epic_games, xbox_games = get_all_launcher_games()
-
-    # Build game list: only non-Steam/Epic/Xbox games
-    existing_games = load_games(config_path)
-    existing_ids = {g.id for g in existing_games}
-    existing_titles = {g.title for g in existing_games}
-    new_games: list[Game] = []
-
-    # Ludusavi's manifest tags each path save/config/etc, but the scan API
-    # does not report tags - so ask the manifest which candidates hold no save
-    # data at all. Roblox is two files, both tagged config, because progress
-    # lives on the account; tracking it produced ten versions of a settings
-    # file (#47).
-    candidate_titles = {
-        title
-        for title, info in games_data.items()
-        if detect_launcher(
-            title, list(info.get("files", {}).keys()),
-            steam_games, epic_games, xbox_games,
-        ) == "other"
-    }
-    config_only = titles_without_save_data(candidate_titles)
-    if config_only:
-        console.print(
-            f"[dim]Skipped {len(config_only)} game(s) with no save data of "
-            f"their own: {', '.join(sorted(config_only))}.[/dim]"
-        )
-
-    for title, info in games_data.items():
-        files = info.get("files", {})
-        save_paths = list(files.keys())
-        detected = detect_launcher(title, save_paths, steam_games, epic_games, xbox_games)
-        if auto_add_skip_reason(title, detected, config_only) is not None:
-            continue
-
-        game_id = _slugify(title)
-        if not game_id or game_id in existing_ids or title in existing_titles:
-            continue
-
-        game = Game(
-            id=game_id,
-            title=title,
-            platform=_current_platform(),
-            cloud_provider=config.cloud_provider or CloudProvider.S3,
-            auto_sync=True,
-        )
-        new_games.append(game)
-
-    # Ownership was decided when each game was first seen and never revisited.
-    # Epic writes a manifest per INSTALLED game, so a title that was not
-    # installed during the first scan is invisible to detect_launcher and stays
-    # tracked forever, duplicating a launcher's own cloud sync (#48). Report
-    # rather than act: removing a game deletes backups on the strength of a
-    # heuristic that has already proven fragile, and keeping a second copy of a
-    # launcher-synced game is a legitimate choice.
-    for game in existing_games:
-        owner = detect_launcher(
-            game.title, [str(p.path) for p in game.save_paths],
-            steam_games, epic_games, xbox_games,
-        )
-        if owner != "other":
-            console.print(
-                f"[yellow]{game.title} is now installed through "
-                f"{owner.capitalize()}, which syncs its own saves.[/yellow] "
-                f"[dim]'gsg remove {game.id}' to stop duplicating it.[/dim]"
-            )
-
-    if new_games:
-        all_games = existing_games + new_games
-        save_games(all_games, config_path)
-        console.print(f"[green]Auto-added {len(new_games)} game(s):[/green]")
-        for g in new_games:
-            console.print(f"  - {g.title}")
-    else:
-        console.print("[dim]No new games found. Using existing tracked games.[/dim]")
+    discover_new_games(config, config_path, ludusavi_path)
 
     # Load all tracked games for watching
     all_tracked = _watchable_games(load_games(config_path))
@@ -1522,16 +1602,43 @@ def auto(
                 f"'gsg set {game.id} --clear-exe' to detect it by title instead[/dim]"
             )
 
-    unprotected = [g.title for g in all_tracked if not db.get_versions(g.id)]
-    if unprotected:
+    # A game gsg has just discovered has saves on disk right now, and neither
+    # trigger reaches them: backups fire on game close, or periodically while
+    # a game runs. Printing "run gsg backup yourself" was advice into a
+    # console that `gsg auto --install` hides, so the saves stayed unprotected
+    # while the tray stayed green (#55). Protect them instead.
+    still_unprotected = protect_unbacked_games(
+        all_tracked, config, config_path, db, ludusavi_path, report_backup
+    )
+    if still_unprotected:
         tray.escalate(
             tray_mod.STATE_WARN,
-            f"{len(unprotected)} game(s) never backed up",
+            f"{len(still_unprotected)} game(s) still never backed up",
         )
         console.print(
-            f"[yellow]Never backed up: {', '.join(unprotected)}[/yellow]\n"
+            f"[yellow]Still unprotected: {', '.join(still_unprotected)}[/yellow]"
+        )
+        console.print(
             "[dim]If these never back up on their own, their process isn't being "
-            "matched — set it with 'gsg add <title> --exe <name.exe>'.[/dim]"
+            "matched - set it with 'gsg add <title> --exe <name.exe>'.[/dim]"
+        )
+
+    # Discovery used to happen once, before the loop. A game installed while
+    # the watcher ran stayed invisible until the next reboot (#54), which on a
+    # machine that stays up for a week is a week of unprotected saves. A
+    # Ludusavi scan is far too expensive for the 5s poll, so it runs on its own
+    # long timer and stays quiet unless it actually finds something.
+    def rescan_for_new_games() -> None:
+        found = discover_new_games(config, config_path, ludusavi_path, quiet=True)
+        if not found:
+            return
+        watcher.add_games(_watchable_games(load_games(config_path)))
+        for game in found:
+            alert("New game found", f"{game.title} is now being backed up.")
+
+    if config.rescan_interval_hours > 0:
+        watcher.set_periodic_task(
+            config.rescan_interval_hours * 3600.0, rescan_for_new_games
         )
 
     try:

@@ -248,9 +248,43 @@ class GameWatcher:
         # Called when a callback raises. Without it a failed close-backup was
         # a log line nobody reads while the tray still showed "Playing" (#41).
         self.on_error: Callable[[str], None] | None = None
+        self._periodic_task: Callable[[], None] | None = None
+        self._periodic_task_interval = 0.0
+        self._periodic_task_last = 0.0
 
     def set_on_error(self, callback: Callable[[str], None]) -> None:
         self.on_error = callback
+
+    def set_periodic_task(
+        self, interval_seconds: float, task: Callable[[], None]
+    ) -> None:
+        """Run ``task`` from the loop, at most every ``interval_seconds``.
+
+        For work that belongs to the watcher's lifetime but is far too
+        expensive for the poll interval - rescanning for newly installed
+        games costs a full Ludusavi scan, against a 5s tick (#54).
+
+        The first run happens one interval from now, not immediately: the
+        caller has just done this work at startup.
+        """
+        self._periodic_task = task
+        self._periodic_task_interval = interval_seconds
+        self._periodic_task_last = time.time()
+
+    def add_games(self, games: list[Game]) -> list[str]:
+        """Start watching any of ``games`` not already tracked.
+
+        Returns the ids actually added. Existing entries are left alone rather
+        than replaced, so a game currently detected as running keeps its pid
+        set and does not spuriously fire a close event.
+        """
+        added: list[str] = []
+        for game in games:
+            if game.id in self.games:
+                continue
+            self.games[game.id] = game
+            added.append(game.id)
+        return added
 
     def set_on_game_close(self, callback: Callable[[Game, ProcessInfo], None]) -> None:
         self.on_game_close = callback
@@ -396,8 +430,20 @@ class GameWatcher:
         logger.info("Starting game watcher with %d tracked games", len(self.games))
         while not self._stop.is_set():
             self.tick()
+            self._run_periodic_task()
             if self._stop.wait(interval):
                 break
+
+    def _run_periodic_task(self) -> None:
+        """Run the registered periodic task if its interval has elapsed."""
+        if self._periodic_task is None or self._periodic_task_interval <= 0:
+            return
+        if time.time() - self._periodic_task_last < self._periodic_task_interval:
+            return
+        # Stamp before running, so a task that takes a while - or throws -
+        # cannot queue itself up to run again immediately.
+        self._periodic_task_last = time.time()
+        self._safe_callback(self._periodic_task)
 
     def _safe_callback(self, callback: Callable[..., None], *args: Any) -> None:
         """Run a callback without letting its failure kill the watch loop.

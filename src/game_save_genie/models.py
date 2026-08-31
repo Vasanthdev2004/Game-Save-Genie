@@ -103,6 +103,12 @@ class SyncConfig(BaseModel):
     ludusavi_path: Path | None = None
     rclone_path: Path | None = None
     storage_limit_gb: float = 5.0  # warn when remote usage nears this (0 = no warning)
+    # How often `gsg auto` looks for newly installed games while it runs.
+    # Discovery used to happen only at startup, so a game installed after the
+    # watcher started was invisible until the next reboot - on a machine that
+    # stays up for a week, that is a week of unprotected saves (#54). A
+    # Ludusavi scan is expensive, hence hours rather than minutes. 0 disables.
+    rescan_interval_hours: float = 6.0
 
 
 class BackupResult(BaseModel):

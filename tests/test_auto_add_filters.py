@@ -108,7 +108,7 @@ def test_no_titles_reads_no_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_the_scan_path_applies_the_config_only_filter() -> None:
     """Wiring: the helper exists and auto-add actually consults it."""
-    source = inspect.getsource(cli.auto)
+    source = inspect.getsource(cli.discover_new_games)
     assert "titles_without_save_data" in source
     assert "auto_add_skip_reason" in source
 
@@ -116,7 +116,7 @@ def test_the_scan_path_applies_the_config_only_filter() -> None:
 def test_the_scan_path_rechecks_ownership_of_tracked_games() -> None:
     """#48: ownership was decided once and never revisited, so an Epic game
     added while Epic had no manifest for it stayed tracked forever."""
-    source = inspect.getsource(cli.auto)
+    source = inspect.getsource(cli.discover_new_games)
     assert "for game in existing_games:" in source
     assert "syncs its own saves" in source
 
@@ -124,7 +124,7 @@ def test_the_scan_path_rechecks_ownership_of_tracked_games() -> None:
 def test_the_recheck_only_reports() -> None:
     """Removing a tracked game would delete backups on a heuristic that has
     already proven fragile, and some people keep a deliberate second copy."""
-    source = inspect.getsource(cli.auto)
+    source = inspect.getsource(cli.discover_new_games)
     recheck = source.split("for game in existing_games:", 1)[1].split("if new_games:", 1)[0]
     assert "remove" not in recheck.replace("'gsg remove", "").replace("gsg remove", "")
 
