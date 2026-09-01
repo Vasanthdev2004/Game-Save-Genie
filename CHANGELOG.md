@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.8.2 — 2026-09-01
+
+### Fixed
+
+- **Times are shown in your time zone rather than UTC.** Backups are stored
+  with timezone-aware UTC timestamps, which is deliberate — version ids have to
+  sort identically on every machine, and sync and retention depend on that. But
+  every place a time was displayed rendered the stored value raw, so on a
+  machine offset from UTC the whole product was wrong by that offset, with
+  nothing to indicate it. Five and a half hours, where this was noticed:
+
+  ```
+  before:  2026-08-31 08:42
+  after:   2026-08-31 14:12
+  ```
+
+  Fixed in all four places a timestamp appears: the dashboard's game and
+  version lists, `gsg status`, and `gsg versions`. Ordering is untouched; this
+  is display only. ([#58](https://github.com/Vasanthdev2004/Game-Save-Genie/pull/58),
+  found and fixed by [@Tudzer](https://github.com/Tudzer))
+
+  Present since the dashboard shipped in 0.6.0, and in every release since.
+
 ## 0.8.1 — 2026-08-31
 
 Two halves of one gap in what "automatic" actually covered. Both were found on
