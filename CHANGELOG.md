@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.8.3 — 2026-09-04
+
+### Fixed
+
+- **Game titles with non-ASCII characters are no longer mangled.** Reading a
+  subprocess with `text=True` decodes using the locale default, which is
+  cp1252 on a stock Windows install, while Ludusavi and rclone both emit
+  UTF-8. So *Grand Theft Auto: The Trilogy — The Definitive Edition* arrived
+  with the dash turned into three wrong characters.
+  ([#60](https://github.com/Vasanthdev2004/Game-Save-Genie/pull/60), found and
+  fixed by [@Tudzer](https://github.com/Tudzer))
+
+  Five other subprocess calls had the same defect. The one that mattered most
+  was rclone's: game ids keep whatever non-ASCII their title had, and an id is
+  part of the remote path, so a mangled listing there is not a cosmetic wrong
+  name — it is retention and restore reading the wrong paths. A test now fails
+  if any subprocess call is added without an explicit encoding.
+
+- **Removing a game sticks.** `gsg remove --purge` deleted a game and its
+  backups, and the next scan added it straight back — because auto-add
+  recorded nothing about the removal, and a launcher-owned game only stays
+  skipped while its launcher reports it as installed. Removals are remembered
+  now, an explicit `gsg add` un-remembers them, and the scan says which games
+  it is skipping for that reason rather than suppressing them silently.
+  ([#61](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/61))
+
+  `gsg remove` and `gsg remove --purge` both record. `gsg pause` is the option
+  that means "stop watching for now" and still records nothing.
+
 ## 0.8.2 — 2026-09-01
 
 ### Fixed
