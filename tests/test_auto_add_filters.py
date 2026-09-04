@@ -368,3 +368,101 @@ def test_native_cloud_is_reported_without_being_asked(
     output = _run_scan(monkeypatch, cloud_manifest)
     assert "Native Cloud" in output
     assert "steam" in output
+
+
+# --- removals stick (#61) ---------------------------------------------------
+# `gsg remove --purge` deleted a game and its backups, and the next rescan
+# added it straight back, because auto-add recorded nothing about the removal.
+# Observed on a real install: 11 games -> 9 -> 11 within two hours.
+
+
+def test_a_removed_game_is_not_auto_added_again() -> None:
+    assert cli.auto_add_skip_reason(
+        "Hogwarts Legacy", "other", set(), {"hogwarts-legacy"}, "hogwarts-legacy"
+    ) == "you removed it"
+
+
+def test_a_game_never_removed_is_still_tracked() -> None:
+    """Only an explicit removal suppresses. Never having been seen is not the
+    same as having been declined."""
+    assert cli.auto_add_skip_reason(
+        "Cyberpunk 2077", "other", set(), {"hogwarts-legacy"}, "cyberpunk-2077"
+    ) is None
+
+
+def test_the_users_decision_outranks_what_gsg_worked_out() -> None:
+    """A removed game that is also launcher-owned should say the user removed
+    it, because that is the reason they can act on."""
+    assert cli.auto_add_skip_reason(
+        "Hogwarts Legacy", "epic", set(), {"hogwarts-legacy"}, "hogwarts-legacy"
+    ) == "you removed it"
+
+
+def test_no_decline_list_behaves_as_before() -> None:
+    """The parameter is optional; existing callers must be unaffected."""
+    assert cli.auto_add_skip_reason("Some Game", "other", set()) is None
+    assert cli.auto_add_skip_reason("Some Game", "steam", set()) == "managed by steam"
+
+
+def test_removing_records_the_decision(tmp_path: Path) -> None:
+    """End to end through the real commands."""
+    from typer.testing import CliRunner
+
+    from game_save_genie.config import load_config
+
+    runner = CliRunner()
+    config_path = str(tmp_path / "config.yaml")
+    runner.invoke(cli.app, ["--config", config_path, "add", "Fake Game", "--exe", "f.exe"])
+    result = runner.invoke(cli.app, ["--config", config_path, "remove", "fake-game"])
+    assert result.exit_code == 0
+    assert load_config(Path(config_path)).declined_game_ids == ["fake-game"]
+
+
+def test_adding_again_clears_the_decision(tmp_path: Path) -> None:
+    """The list must never become a trap that silently ignores `gsg add`."""
+    from typer.testing import CliRunner
+
+    from game_save_genie.config import load_config
+
+    runner = CliRunner()
+    config_path = str(tmp_path / "config.yaml")
+    runner.invoke(cli.app, ["--config", config_path, "add", "Fake Game", "--exe", "f.exe"])
+    runner.invoke(cli.app, ["--config", config_path, "remove", "fake-game"])
+    runner.invoke(cli.app, ["--config", config_path, "add", "Fake Game", "--exe", "f.exe"])
+    assert load_config(Path(config_path)).declined_game_ids == []
+
+
+def test_removing_twice_does_not_duplicate(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from game_save_genie.config import load_config
+
+    runner = CliRunner()
+    config_path = str(tmp_path / "config.yaml")
+    for _ in range(2):
+        runner.invoke(cli.app, ["--config", config_path, "add", "Fake Game", "--exe", "f.exe"])
+        runner.invoke(cli.app, ["--config", config_path, "remove", "fake-game"])
+    assert load_config(Path(config_path)).declined_game_ids == ["fake-game"]
+
+
+def test_pause_does_not_record_a_decline(tmp_path: Path) -> None:
+    """`gsg pause` is the reversible option and must stay that way; only
+    `remove` means "stop tracking this"."""
+    from typer.testing import CliRunner
+
+    from game_save_genie.config import load_config
+
+    runner = CliRunner()
+    config_path = str(tmp_path / "config.yaml")
+    runner.invoke(cli.app, ["--config", config_path, "add", "Fake Game", "--exe", "f.exe"])
+    runner.invoke(cli.app, ["--config", config_path, "pause", "fake-game"])
+    assert load_config(Path(config_path)).declined_game_ids == []
+
+
+def test_discovery_consults_the_decline_list() -> None:
+    """Wiring: the predicate knows, and the scan passes it through."""
+    import inspect
+
+    source = inspect.getsource(cli.discover_new_games)
+    assert "declined_game_ids" in source
+    assert "declined" in source

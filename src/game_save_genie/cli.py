@@ -425,6 +425,12 @@ def add(
     )
     games.append(game)
     save_games(games, config_path)
+    # Asking for it explicitly overrides a previous removal, so the decline
+    # list cannot become a trap that silently ignores `gsg add` (#61).
+    config = load_config(config_path)
+    if game_id in config.declined_game_ids:
+        config.declined_game_ids.remove(game_id)
+        save_config(config, config_path)
     mode = f"custom, {len(save_paths)} path(s)" if save_paths else "Ludusavi"
     console.print(f"[green]Added game: {title} ({game_id}) — {mode}[/green]")
 
@@ -577,7 +583,17 @@ def remove(
 
     games = [g for g in games if g.id != game_id]
     save_games(games, config_path)
+    # Remember it, or the next rescan adds it straight back and `gsg remove`
+    # looks broken - which with --purge means it deleted backups for nothing
+    # (#61). `gsg pause` is the option for "stop watching for now".
+    if game_id not in config.declined_game_ids:
+        config.declined_game_ids.append(game_id)
+        save_config(config, config_path)
     console.print(f"[green]Removed: {game.title} ({game_id})[/green]")
+    console.print(
+        f"[dim]It will not be auto-added again. "
+        f"'gsg add \"{game.title}\"' if you change your mind.[/dim]"
+    )
 
     if purge:
         # Delete local backups (live backup dir + per-version snapshots)
@@ -1244,6 +1260,8 @@ def discover_new_games(
             steam_games, epic_games, xbox_games,
         ) == "other"
     }
+    declined = set(config.declined_game_ids)
+    declined_seen: list[str] = []
     config_only = titles_without_save_data(candidate_titles)
     if config_only:
         say(
@@ -1255,10 +1273,15 @@ def discover_new_games(
         files = info.get("files", {})
         save_paths = list(files.keys())
         detected = detect_launcher(title, save_paths, steam_games, epic_games, xbox_games)
-        if auto_add_skip_reason(title, detected, config_only) is not None:
+        game_id = _slugify(title)
+        reason = auto_add_skip_reason(
+            title, detected, config_only, declined, game_id
+        )
+        if reason is not None:
+            if reason == "you removed it":
+                declined_seen.append(title)
             continue
 
-        game_id = _slugify(title)
         if not game_id or game_id in existing_ids or title in existing_titles:
             continue
 
@@ -1301,6 +1324,16 @@ def discover_new_games(
         logging.getLogger(__name__).info("Auto-added games: %s", logger_names)
     else:
         say("[dim]No new games found. Using existing tracked games.[/dim]")
+
+    if declined_seen:
+        # Visible rather than silent: a list that quietly suppresses games is
+        # its own trap, and this is how someone discovers why a game they
+        # installed is not showing up.
+        say(
+            f"[dim]Not tracking {len(declined_seen)} game(s) you removed: "
+            f"{', '.join(sorted(declined_seen))}. "
+            f"'gsg add \"<title>\"' to track one again.[/dim]"
+        )
 
     return new_games
 
@@ -2889,18 +2922,28 @@ def _record_applied_cloud_version(db: Database, game_id: str, version_id: str) -
 
 
 def auto_add_skip_reason(
-    title: str, detected_launcher: str, config_only: set[str]
+    title: str,
+    detected_launcher: str,
+    config_only: set[str],
+    declined_ids: set[str] | None = None,
+    game_id: str | None = None,
 ) -> str | None:
     """Why auto-add should leave this game alone, or None to track it.
 
-    A predicate rather than two inline conditions so the rule can be tested
-    directly. Both reasons are things gsg knows and the user does not, and
-    both used to be silent: a launcher-managed game is already synced by its
-    launcher, and a config-only game has no save data to protect (#47, #48).
+    A predicate rather than inline conditions so the rule can be tested
+    directly. Two of the reasons are things gsg worked out and the user did
+    not, and both used to be silent: a launcher-managed game is already synced
+    by its launcher, and a config-only game has no save data to protect
+    (#47, #48). The third is the opposite - something the user told gsg, which
+    the scan used to forget the moment it ran again (#61).
 
     Neither reason applies to an explicit ``gsg add``. Someone who wants their
     settings versioned, or a second copy of a Steam save, is entitled to it.
     """
+    if declined_ids and game_id and game_id in declined_ids:
+        # Checked first: an explicit decision by the user outranks anything
+        # gsg worked out for itself.
+        return "you removed it"
     if detected_launcher != "other":
         return f"managed by {detected_launcher}"
     if title in config_only:
