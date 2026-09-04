@@ -309,7 +309,14 @@ def run_rclone(
     """Run rclone with the given arguments."""
     cmd = [str(binary), *args]
     logger.debug("Running: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=capture_output, text=True, check=False)
+    # encoding is explicit because text=True otherwise decodes with the
+    # locale default - cp1252 on a stock Windows install. rclone emits UTF-8,
+    # and a game id keeps whatever non-ASCII its title had (_slugify does not
+    # strip it), so that id is part of the remote path this parses. Mangling
+    # it corrupts the version listing that prune and restore work from (#60).
+    result = subprocess.run(
+        cmd, capture_output=capture_output, text=True, encoding="utf-8", check=False
+    )
     if check and result.returncode != 0:
         raise RuntimeError(
             f"rclone failed (exit {result.returncode}): {result.stderr or result.stdout}"

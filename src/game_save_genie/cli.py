@@ -1888,7 +1888,9 @@ def _install_systemd_unit(gsg_path: Path, config_path: Path | None) -> None:
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", _SYSTEMD_UNIT_NAME],
     ):
-        result = subprocess.run(args, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            args, capture_output=True, text=True, encoding="utf-8", check=False
+        )
         if result.returncode != 0:
             console.print(
                 f"[red]{' '.join(args)} failed: "
@@ -1912,14 +1914,14 @@ def _uninstall_systemd_unit() -> None:
     if have_systemctl:
         subprocess.run(
             ["systemctl", "--user", "disable", "--now", _SYSTEMD_UNIT_NAME],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, encoding="utf-8", check=False,
         )
     if unit_path.exists():
         unit_path.unlink()
         if have_systemctl:
             subprocess.run(
                 ["systemctl", "--user", "daemon-reload"],
-                capture_output=True, text=True, check=False,
+                capture_output=True, text=True, encoding="utf-8", check=False,
             )
         console.print(f"[green]Removed systemd user service: {unit_path}[/green]")
         removed = True

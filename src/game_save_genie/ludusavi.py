@@ -294,6 +294,7 @@ def run_ludusavi(
         cmd,
         capture_output=capture_output,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if check and result.returncode != 0:
