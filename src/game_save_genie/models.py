@@ -109,6 +109,12 @@ class SyncConfig(BaseModel):
     # stays up for a week, that is a week of unprotected saves (#54). A
     # Ludusavi scan is expensive, hence hours rather than minutes. 0 disables.
     rescan_interval_hours: float = 6.0
+    # Game ids the user has removed. Auto-add consults this, because a scan
+    # that re-adds a game somebody deleted makes `gsg remove` look broken -
+    # and with --purge it had already deleted their backups (#61). Cleared by
+    # an explicit `gsg add`; `gsg pause` is the reversible option and does not
+    # touch this.
+    declined_game_ids: list[str] = Field(default_factory=list)
 
 
 class BackupResult(BaseModel):
