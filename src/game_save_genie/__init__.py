@@ -1,3 +1,3 @@
 """Game Save Genie - Self-hosted cloud save sync for games."""
 
-__version__ = "0.8.4"
+__version__ = "0.9.0"
