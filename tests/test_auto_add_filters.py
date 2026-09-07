@@ -466,3 +466,76 @@ def test_discovery_consults_the_decline_list() -> None:
     source = inspect.getsource(cli.discover_new_games)
     assert "declined_game_ids" in source
     assert "declined" in source
+
+
+# --- optional auto-scan (#64) ----------------------------------------------
+# Some people want the tracked list to be exactly what they put there.
+# Ludusavi's data comes from PCGamingWiki, which does not record every
+# launcher's own cloud sync - Rockstar's, for one - so games that really are
+# synced keep getting offered.
+
+
+def test_scanning_is_on_by_default() -> None:
+    """Turning discovery off must be a choice, not the default: most people
+    want gsg to find their games."""
+    from game_save_genie.models import SyncConfig
+
+    assert SyncConfig(backup_dir=Path("x")).auto_scan is True
+
+
+def test_the_flag_writes_and_reads_back(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from game_save_genie.config import load_config
+
+    runner = CliRunner()
+    config_path = str(tmp_path / "config.yaml")
+
+    runner.invoke(cli.app, ["--config", config_path, "config", "--no-auto-scan"])
+    assert load_config(Path(config_path)).auto_scan is False
+
+    runner.invoke(cli.app, ["--config", config_path, "config", "--auto-scan"])
+    assert load_config(Path(config_path)).auto_scan is True
+
+
+def test_config_shows_the_setting(tmp_path: Path) -> None:
+    """A setting you cannot see is one people cannot trust."""
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(
+        cli.app, ["--config", str(tmp_path / "config.yaml"), "config"]
+    )
+    assert "auto_scan" in result.output
+
+
+def test_other_config_options_still_work_alongside_it(tmp_path: Path) -> None:
+    """The flag is optional; omitting it must not reset it, and must not stop
+    another option being set in the same call."""
+    from typer.testing import CliRunner
+
+    from game_save_genie.config import load_config
+
+    runner = CliRunner()
+    config_path = str(tmp_path / "config.yaml")
+    runner.invoke(cli.app, ["--config", config_path, "config", "--no-auto-scan"])
+    runner.invoke(cli.app, ["--config", config_path, "config", "--max-versions", "3"])
+    config = load_config(Path(config_path))
+    assert config.max_versions == 3
+    assert config.auto_scan is False
+
+
+def test_auto_skips_discovery_when_scanning_is_off() -> None:
+    """Wiring, both halves: the startup scan and the periodic rescan."""
+    import inspect
+
+    source = inspect.getsource(cli.auto)
+    assert "if config.auto_scan:" in source
+    assert "if config.auto_scan and config.rescan_interval_hours > 0:" in source
+
+
+def test_auto_says_when_it_is_not_scanning() -> None:
+    """Otherwise "why is my new game not backed up" has no visible cause."""
+    import inspect
+
+    source = inspect.getsource(cli.auto)
+    assert "auto-scan is off" in source
