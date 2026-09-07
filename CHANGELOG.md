@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.8.4 — 2026-09-07
+
+### Added
+
+- **The tracked list can be curated by hand.** `gsg auto` scanned for games
+  and added them before backing anything up, with no way to turn that off, so
+  a list you had pruned deliberately kept growing back.
+
+  ```
+  gsg config --no-auto-scan    # track exactly what you put there
+  gsg config --auto-scan       # back to finding games for you
+  ```
+
+  Off stops all discovery — the startup scan and the periodic rescan both. On
+  by default, because finding your games is what most people want and turning
+  that off should be a choice rather than something that happens to you.
+
+  The reasoning behind the request is the useful part: Ludusavi's data comes
+  from PCGamingWiki, which does not record every launcher's own cloud sync.
+  Rockstar's games sync themselves and are not listed as doing so. gsg cannot
+  know better, so whichever way that guess falls, somebody has to be able to
+  overrule it.
+  ([#64](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/64),
+  requested by [@Tudzer](https://github.com/Tudzer))
+
+- `gsg config` now shows `auto_scan`, and any games you have removed and gsg
+  has agreed not to re-add. Both were settings with no way to see them.
+
+### Notes
+
+`gsg auto` says when it is not scanning, and so does the message you get with
+nothing tracked. "Why is my new game not backed up" needs a visible cause.
+
+With scanning off and nothing tracked yet, gsg finds nothing and says so
+rather than scanning anyway on the grounds that an empty watcher looks broken.
+Off means off — second-guessing an explicit setting is what caused the removal
+bug fixed in 0.8.3.
+
 ## 0.8.3 — 2026-09-04
 
 ### Fixed
