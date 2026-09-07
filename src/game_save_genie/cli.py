@@ -1412,12 +1412,28 @@ def auto(
     _LOCK_STATE["held"] = True  # this process is now the sole backup writer
 
     ludusavi_path = get_ludusavi_path(config_path)
-    discover_new_games(config, config_path, ludusavi_path)
+    if config.auto_scan:
+        discover_new_games(config, config_path, ludusavi_path)
+    else:
+        # The user curates the list themselves. Say so rather than starting
+        # silently, or "why is my new game not backed up" becomes a mystery
+        # with no visible cause (#64).
+        console.print(
+            "[dim]Not scanning for new games (auto-scan is off). "
+            "'gsg add \"<title>\"' to track one, "
+            "'gsg config --auto-scan' to turn scanning back on.[/dim]"
+        )
 
     # Load all tracked games for watching
     all_tracked = _watchable_games(load_games(config_path))
     if not all_tracked:
-        message = "No games to watch. Play some games and run 'gsg auto' again."
+        message = (
+            "No games to watch, and auto-scan is off. "
+            "'gsg add \"<title>\"' to track one, or "
+            "'gsg config --auto-scan' to let gsg find them."
+            if not config.auto_scan
+            else "No games to watch. Play some games and run 'gsg auto' again."
+        )
         if no_wizard:
             # Benign in service context (fresh machine, nothing installed
             # yet): exit clean so systemd does not crash-loop; the next
@@ -1669,7 +1685,7 @@ def auto(
         for game in found:
             alert("New game found", f"{game.title} is now being backed up.")
 
-    if config.rescan_interval_hours > 0:
+    if config.auto_scan and config.rescan_interval_hours > 0:
         watcher.set_periodic_task(
             config.rescan_interval_hours * 3600.0, rescan_for_new_games
         )
@@ -1975,6 +1991,12 @@ def config_cmd(
     storage_limit: float | None = typer.Option(
         None, "--storage-limit", help="Cloud storage limit in GB for usage warnings (0 = off)"
     ),
+    auto_scan: bool | None = typer.Option(
+        None,
+        "--auto-scan/--no-auto-scan",
+        help="Whether 'gsg auto' looks for new games to track. Off means the "
+             "tracked list is exactly what you put there.",
+    ),
 ) -> None:
     """View configuration, or edit it by passing options."""
     config_path = ctx.obj.get("config_path") or get_config_path()
@@ -2004,6 +2026,9 @@ def config_cmd(
     if storage_limit is not None:
         config.storage_limit_gb = storage_limit
         changed = True
+    if auto_scan is not None:
+        config.auto_scan = auto_scan
+        changed = True
 
     if changed:
         save_config(config, config_path)
@@ -2016,6 +2041,11 @@ def config_cmd(
     console.print(f"rclone_remote_name: {config.rclone_remote_name}")
     console.print(f"remote_root: {config.remote_root}")
     console.print(f"storage_limit_gb: {config.storage_limit_gb:g}")
+    console.print(f"auto_scan: {config.auto_scan}")
+    if config.declined_game_ids:
+        console.print(
+            f"declined (not auto-added): {', '.join(sorted(config.declined_game_ids))}"
+        )
 
 
 @app.command()

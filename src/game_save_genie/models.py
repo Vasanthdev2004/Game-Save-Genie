@@ -108,6 +108,13 @@ class SyncConfig(BaseModel):
     # watcher started was invisible until the next reboot - on a machine that
     # stays up for a week, that is a week of unprotected saves (#54). A
     # Ludusavi scan is expensive, hence hours rather than minutes. 0 disables.
+    # Whether `gsg auto` looks for games to track at all. Off means the
+    # tracked list is exactly what the user put there - useful when Ludusavi's
+    # data is wrong for a launcher it does not know about, such as Rockstar's,
+    # whose games sync themselves but are not recorded as doing so (#64).
+    # Turning this off disables the periodic rescan too; there is no scanning
+    # of any kind.
+    auto_scan: bool = True
     rescan_interval_hours: float = 6.0
     # Game ids the user has removed. Auto-add consults this, because a scan
     # that re-adds a game somebody deleted makes `gsg remove` look broken -
