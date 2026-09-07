@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-09-07
 
 ### Added
 
@@ -25,6 +25,8 @@
 
 ### Fixed
 
+- A queued dashboard selection event no longer crashes during shutdown after
+  its widgets have been removed. Normal startup selection is unchanged.
 - A busy writer no longer drops an automatic game-close backup. Deferred backup
   requests survive restart and retry before uploads; their health warning stays
   visible until a regular backup succeeds. Paused/removed games are rechecked
@@ -48,6 +50,17 @@
   (and can exceed local retention). Restore the exact original snapshot file,
   then use `gsg retry` or dashboard **u** to revalidate it; new healthy snapshots
   can still upload while historical snapshots are blocked.
+
+### Upgrade notes
+
+- Quit older watcher processes before upgrading, then restart `gsg auto` or
+  `gsg watch` so every process uses the new writer lock. Automatic retries need
+  a watcher running; `gsg retry` and dashboard **u** also work on demand.
+- Existing save records migrate automatically without changing your cloud
+  settings or inventing historical upload timestamps. Older uploads may show
+  "not recorded" for their upload time until a new upload completes.
+- Pending or blocked snapshots can temporarily exceed `max_versions`. Their
+  files and history are retained so an outage cannot prune an unsent save.
 
 ## 0.8.4 — 2026-09-07
 
