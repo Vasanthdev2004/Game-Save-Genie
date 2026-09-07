@@ -129,6 +129,9 @@ def test_migrates_legacy_schema(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.origin == "user"
     assert loaded.sha256 is None
+    assert loaded.cloud_synced_at is None
+    assert db.get_upload_jobs() == []  # No guessed upload intent for old --no-cloud snapshots.
+    assert db.get_backup_issue("game") is None
 
     db.add_version(_make_version("v-new", tmp_path, minute=1, origin="auto"))
     reloaded = db.get_version("v-new")

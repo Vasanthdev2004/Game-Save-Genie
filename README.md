@@ -25,9 +25,10 @@ Game Save Genie runs quietly in the background and gives you what the launchers 
 - 🕹️ **Knows 19,000+ games** — save locations detected via the open-source [Ludusavi](https://github.com/mtkennerly/ludusavi) database, plus process watching to know when you're playing
 - 🎮 **Emulators too** — `gsg add --path` backs up any folder or file (RetroArch, PCSX2, Dolphin, memcards, save states), so games Ludusavi doesn't know are covered as well
 - 💾 **Backs up automatically** — when a game closes, and every 10 minutes while it runs
-- 🔔 **Tells you when something breaks** — a tray icon shows at a glance whether your saves are safe (and goes red, with a notification, if a backup or upload fails) instead of failing silently in the background
+- 🔔 **Shows save health** — the dashboard, `gsg status`, and tray distinguish protected, local-only, queued, paused, and failed saves; a healthy game never hides another game's failure
+- 📶 **Recovers from outages** — failed uploads stay queued across restarts and retry automatically without another play session
 - 🕰️ **Every session is a version** — immutable, checksummed snapshots; roll back to any point with `gsg restore --version`
-- ☁️ **Your own cloud** — Google Drive (free 15 GB), OneDrive, any S3 bucket, or [anything rclone speaks](https://rclone.org/overview/); retention is enforced so it never fills up, and **delta uploads** only send the save files that changed (an unchanged 40 MB slot is never re-uploaded)
+- ☁️ **Your own cloud** — Google Drive (free 15 GB), OneDrive, any S3 bucket, or [anything rclone speaks](https://rclone.org/overview/); version retention controls history, and **delta uploads** only send the save files that changed (an unchanged 40 MB slot is never re-uploaded)
 - 🖥️ **Follows you between PCs** — `gsg pull` restores on any machine, remapping paths saved under a different username on Windows, Linux or macOS
 - 🔒 **Paranoid by design** — downloads are verified before anything is touched, a safety backup is taken before every restore, restores never run while the game is, and a strictly-newer rule means offline progress is never clobbered
 
@@ -48,6 +49,10 @@ gsg
 That's the whole setup. A wizard finds your games, connects your cloud (Google Drive/OneDrive open a browser — sign in, click Allow, done), and offers start-at-boot. From then on `gsg auto` protects everything, hands-free. Ludusavi and rclone are downloaded automatically on first use.
 
 Once you're set up, running `gsg` again opens the **dashboard** — your games, every version, and a one-key restore. No ids to copy.
+
+<img src="assets/dashboard.svg" alt="Game Save Genie terminal dashboard: searchable games, save health, readable restore points, and a queued upload" width="800">
+
+*Example library in an 80-column terminal. Wider terminals show games and history side by side.*
 
 **Homelab?** Run your own save server with one `docker compose up` and connect it with `gsg setup-s3` — see [docker/README.md](docker/README.md). Works with any S3-compatible store (MinIO, Garage, TrueNAS…), supports per-friend accounts, and your saves never leave your network.
 
@@ -84,6 +89,7 @@ gsg add "RetroArch" --path ~/.config/retroarch/saves --path ~/.config/retroarch/
                             # emulator / custom folders — repeat --path as needed
 
 gsg backup [game-id]      # back up now (--dry-run previews, changes nothing)
+gsg retry [game-id]       # retry queued uploads now, or upload the latest local-only snapshot
 gsg versions <game-id>    # local history      gsg cloud-list <game-id>  # cloud history
 gsg restore <game-id> [--version ID]         # roll back to any local snapshot
 gsg pull <game-id> [--version ID]            # restore from the cloud (any machine)
@@ -93,6 +99,50 @@ gsg pause / resume <game-id>   # exclude/re-include a game
 gsg remove <game-id> [--purge] # untrack (--purge deletes local + cloud saves)
 ```
 
+## Save health and offline recovery
+
+Open `gsg ui` (or `gsg status`) to see each game's protection state, last backup,
+last recorded successful upload, and any failure with a next step. In the
+dashboard, **u** retries uploads for the selected game; **b** makes a backup.
+Health refreshes every five seconds without changing your selected restore point.
+
+Press **/** to find a game, **Enter** to browse matches, and **Esc** to clear the
+search. **Tab** moves between panes; **c** switches local/cloud history, **r**
+restores the selected point after confirmation, and **F5** reloads. Restore
+points show readable times, labels, and an explicit **Safety** kind for
+pre-restore copies; the confirmation still shows the full version ID. **L**
+toggles the activity log, which opens after an operation. Long health messages
+can be scrolled without hiding the game/history tables.
+
+**Protected** means the latest local snapshot was successfully uploaded to the
+currently configured destination. It is local evidence of a completed upload,
+not a fresh check that the remote copy still exists. Older versions may have no
+recorded upload time.
+
+`gsg auto` and `gsg watch` check the persistent upload queue every minute.
+Failures back off from one minute to at most one hour. Retrying uploads the
+original checksummed snapshot, even if the live save has since changed. No new
+game session is required. A watcher must be running for automatic retries;
+otherwise use `gsg retry` or the dashboard's **u** key.
+
+- `--no-cloud` backups and pre-restore safety snapshots are never automatically
+  queued. Explicitly retrying may upload the latest local-only regular snapshot.
+- Paused or removed games are skipped. Queued uploads keep their original
+  remote name and root; changing cloud settings does not silently redirect them.
+- Pending snapshots are exempt from local retention until uploaded, so an
+  extended outage can temporarily exceed `max_versions` and use more disk space.
+- Damaged queued snapshots are retained and marked **Needs attention**, not
+  repeatedly uploaded. Recover the original snapshot file from another copy,
+  then use **u** or `gsg retry` to revalidate it. New healthy backups can still
+  upload while an older snapshot is blocked.
+- If another save operation is busy when a game closes, its automatic backup
+  request survives restart and is retried before uploads or idle cloud restores.
+- Games discovered by a periodic rescan get their first backup immediately.
+- A separate writer lock serializes backup, upload, restore, and purge operations
+  across the CLI, dashboard, and watcher. An idle watcher does not block them.
+
+Restart any older watcher after upgrading so it participates in the new writer lock.
+
 ## Playing on two machines
 
 Run the same setup (same cloud account) on both PCs. Each machine backs itself up; newer cloud saves are pulled down at startup and while a game isn't running. `gsg pull --all` catches a machine up on demand.
@@ -101,7 +151,7 @@ The trust rules that make this safe:
 
 1. **Verify first** — downloads are integrity-checked and staged before anything on disk changes; a bad download changes nothing.
 2. **Safety backup always** — your current saves are snapshotted before every restore, and the restore aborts if that fails.
-3. **Strictly newer only** — a restore only happens when the cloud is ahead of everything this machine has seen. Played offline? Your progress wins and uploads on next close.
+3. **Strictly newer only** — a restore only happens when the cloud is ahead of everything this machine has seen. Offline backups stay local and queued until an upload succeeds.
 4. **Never under a live game** — if you're playing, you get a notification instead of a mid-session overwrite.
 5. **Usernames remapped** — saves recorded under `C:\Users\alice\...` restore correctly for `bob`, both in Ludusavi's manifest and the backed-up file tree.
 
@@ -144,6 +194,7 @@ src/game_save_genie/
   remap.py          # cross-machine path remapping
   archive.py        # safe extraction, snapshot zipping, hashing
   database.py       # SQLite version + sync-state tracking
+  health.py         # shared save-health status from local backup and upload evidence
   config.py         # config + tracked-games persistence
   launcher.py       # Steam/Epic/Xbox detection
   notify.py         # file logging + Windows toasts

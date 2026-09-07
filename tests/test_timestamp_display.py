@@ -87,8 +87,8 @@ def _flatten(output: str) -> str:
 
 
 def test_every_render_site_converts() -> None:
-    """The dashboard runs in a Textual app that is awkward to drive here, so
-    its two sites are pinned structurally. If a fifth render site appears,
+    """The dashboard's history timestamp site is pinned structurally alongside
+    the two CLI sites. If a fourth render site appears,
     this fails and asks for it to be covered properly."""
     sources = [
         Path("src/game_save_genie/cli.py").read_text(encoding="utf-8"),
@@ -98,4 +98,4 @@ def test_every_render_site_converts() -> None:
     raw = re.findall(r"created_at\.strftime", joined)
     converted = re.findall(r"created_at\.astimezone\(\)\.strftime", joined)
     assert raw == [], f"{len(raw)} timestamp(s) still rendered as UTC"
-    assert len(converted) == 4, f"expected 4 render sites, found {len(converted)}"
+    assert len(converted) == 3, f"expected 3 render sites, found {len(converted)}"

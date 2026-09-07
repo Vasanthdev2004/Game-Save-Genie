@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import Platform, SaveVersion
+from .models import Platform, SaveVersion, UploadJob
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS save_versions (
@@ -32,6 +32,26 @@ CREATE TABLE IF NOT EXISTS sync_state (
 
 CREATE INDEX IF NOT EXISTS idx_versions_game_id ON save_versions(game_id);
 CREATE INDEX IF NOT EXISTS idx_versions_created_at ON save_versions(created_at);
+
+CREATE TABLE IF NOT EXISTS upload_jobs (
+    version_id TEXT PRIMARY KEY,
+    remote_name TEXT NOT NULL,
+    remote_root TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at REAL NOT NULL DEFAULT 0,
+    last_error TEXT,
+    blocked INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS backup_issues (
+    game_id TEXT PRIMARY KEY,
+    message TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backup_requests (
+    game_id TEXT PRIMARY KEY,
+    label TEXT
+);
 """
 
 # Columns added after the initial release; applied via ALTER TABLE so
@@ -40,6 +60,7 @@ _MIGRATION_COLUMNS = {
     "sha256": "sha256 TEXT",
     "origin": "origin TEXT NOT NULL DEFAULT 'user'",
     "content_digest": "content_digest TEXT",
+    "cloud_synced_at": "cloud_synced_at TEXT",
 }
 
 
@@ -66,17 +87,24 @@ class Database:
             for column, definition in _MIGRATION_COLUMNS.items():
                 if column not in existing:
                     conn.execute(f"ALTER TABLE save_versions ADD COLUMN {definition}")
+            upload_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(upload_jobs)").fetchall()
+            }
+            if "blocked" not in upload_columns:
+                conn.execute("ALTER TABLE upload_jobs ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
             conn.commit()
 
-    def add_version(self, version: SaveVersion) -> None:
+    def add_version(
+        self, version: SaveVersion, upload_target: tuple[str, str] | None = None
+    ) -> None:
         with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO save_versions
                 (id, game_id, created_at, local_path, size_bytes, file_count, label,
                  source_machine, platform, cloud_synced, cloud_remote_path, sha256, origin,
-                 content_digest)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content_digest, cloud_synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     version.id,
@@ -93,8 +121,14 @@ class Database:
                     version.sha256,
                     version.origin,
                     version.content_digest,
+                    version.cloud_synced_at.isoformat() if version.cloud_synced_at else None,
                 ),
             )
+            if upload_target is not None and version.origin != "safety":
+                conn.execute(
+                    "INSERT INTO upload_jobs (version_id, remote_name, remote_root) VALUES (?, ?, ?)",
+                    (version.id, *upload_target),
+                )
             conn.commit()
 
     def get_versions(self, game_id: str) -> list[SaveVersion]:
@@ -129,6 +163,7 @@ class Database:
 
     def delete_version(self, version_id: str) -> None:
         with self._connection() as conn:
+            conn.execute("DELETE FROM upload_jobs WHERE version_id = ?", (version_id,))
             conn.execute("DELETE FROM save_versions WHERE id = ?", (version_id,))
             conn.commit()
 
@@ -140,6 +175,12 @@ class Database:
         same title resurrects them, pointing at snapshots that no longer exist.
         """
         with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM upload_jobs WHERE version_id IN "
+                "(SELECT id FROM save_versions WHERE game_id = ?)", (game_id,),
+            )
+            conn.execute("DELETE FROM backup_issues WHERE game_id = ?", (game_id,))
+            conn.execute("DELETE FROM backup_requests WHERE game_id = ?", (game_id,))
             cursor = conn.execute("DELETE FROM save_versions WHERE game_id = ?", (game_id,))
             removed = cursor.rowcount
             conn.execute("DELETE FROM sync_state WHERE game_id = ?", (game_id,))
@@ -149,10 +190,90 @@ class Database:
     def mark_cloud_synced(self, version_id: str, remote_path: str) -> None:
         with self._connection() as conn:
             conn.execute(
-                "UPDATE save_versions SET cloud_synced = 1, cloud_remote_path = ? WHERE id = ?",
-                (remote_path, version_id),
+                "UPDATE save_versions SET cloud_synced = 1, cloud_remote_path = ?, "
+                "cloud_synced_at = ? WHERE id = ?",
+                (remote_path, datetime.now(timezone.utc).isoformat(), version_id),
             )
+            conn.execute("DELETE FROM upload_jobs WHERE version_id = ?", (version_id,))
             conn.commit()
+
+    def enqueue_upload(self, version_id: str, remote_name: str, remote_root: str) -> None:
+        """Queue an existing snapshot without resetting a failed attempt's backoff."""
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO upload_jobs (version_id, remote_name, remote_root) "
+                "SELECT id, ?, ? FROM save_versions WHERE id = ? AND origin != 'safety'",
+                (remote_name, remote_root, version_id),
+            )
+
+    def get_upload_jobs(self, game_id: str | None = None) -> list[UploadJob]:
+        query = "SELECT j.* FROM upload_jobs j JOIN save_versions v ON v.id = j.version_id"
+        params: tuple[str, ...] = ()
+        if game_id is not None:
+            query += " WHERE v.game_id = ?"
+            params = (game_id,)
+        query += " ORDER BY j.next_attempt_at, v.created_at"
+        with self._connection() as conn:
+            return [UploadJob.model_validate(dict(row)) for row in conn.execute(query, params)]
+
+    def fail_upload(self, version_id: str, error: str, now: float, *, blocked: bool = False) -> None:
+        """Retry after one minute, doubling up to an hour; persist across restarts."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT attempts FROM upload_jobs WHERE version_id = ?", (version_id,)
+            ).fetchone()
+            if row is not None:
+                delay = min(3600, 60 * 2 ** min(int(row["attempts"]), 6))
+                conn.execute(
+                    "UPDATE upload_jobs SET attempts = attempts + 1, "
+                    "next_attempt_at = ?, last_error = ?, blocked = ? WHERE version_id = ?",
+                    (now + delay, error, int(blocked), version_id),
+                )
+
+    def set_backup_issue(self, game_id: str, message: str | None) -> None:
+        with self._connection() as conn:
+            if message is None:
+                conn.execute("DELETE FROM backup_issues WHERE game_id = ?", (game_id,))
+            else:
+                conn.execute(
+                    "INSERT INTO backup_issues (game_id, message) VALUES (?, ?) "
+                    "ON CONFLICT(game_id) DO UPDATE SET message = excluded.message",
+                    (game_id, message),
+                )
+
+    def get_backup_issue(self, game_id: str) -> str | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT message FROM backup_issues WHERE game_id = ?", (game_id,)
+            ).fetchone()
+        return str(row["message"]) if row else None
+
+    def defer_backup(self, game_id: str, label: str | None, message: str) -> None:
+        """Retain an automatic close/periodic backup when another writer is busy."""
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO backup_requests (game_id, label) VALUES (?, ?) "
+                "ON CONFLICT(game_id) DO UPDATE SET label = excluded.label",
+                (game_id, label),
+            )
+            conn.execute(
+                "INSERT INTO backup_issues (game_id, message) VALUES (?, ?) "
+                "ON CONFLICT(game_id) DO UPDATE SET message = excluded.message",
+                (game_id, message),
+            )
+
+    def get_deferred_backups(self, game_id: str | None = None) -> list[tuple[str, str | None]]:
+        query = "SELECT game_id, label FROM backup_requests"
+        params: tuple[str, ...] = ()
+        if game_id is not None:
+            query += " WHERE game_id = ?"
+            params = (game_id,)
+        with self._connection() as conn:
+            return [(row["game_id"], row["label"]) for row in conn.execute(query, params)]
+
+    def clear_deferred_backup(self, game_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute("DELETE FROM backup_requests WHERE game_id = ?", (game_id,))
 
     def count_versions(self) -> int:
         with self._connection() as conn:
@@ -205,4 +326,7 @@ class Database:
             sha256=row["sha256"],
             origin=row["origin"] or "user",
             content_digest=row["content_digest"],
+            cloud_synced_at=(
+                datetime.fromisoformat(row["cloud_synced_at"]) if row["cloud_synced_at"] else None
+            ),
         )

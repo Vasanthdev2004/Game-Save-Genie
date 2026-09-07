@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A clearer terminal dashboard: searchable games, stacked 80-column layout,
+  side-by-side wide layout, readable history times and labels, explicit Safety
+  copies, scrollable health details, and a collapsible activity log. Search
+  typing cannot trigger backup/restore/upload actions; stale cloud results are
+  discarded when filtering empties the selection. Full version IDs stay in the
+  restore confirmation. `gsg status` also fits an 80-column terminal.
+- Shared save health in `gsg status`, the dashboard, and tray: protected,
+  waiting to upload, local only, paused, and needs attention. Shows last backup,
+  last recorded upload, and actionable failures without claiming a fresh remote
+  integrity check. Dashboard health refreshes without moving the restore cursor.
+- Persistent upload intent recorded with each cloud-enabled snapshot. `gsg auto`
+  and `gsg watch` retry queued uploads every minute with exponential backoff up
+  to an hour, including after a restart and with unchanged saves. `gsg retry`
+  and dashboard **u** trigger an immediate attempt.
+- Queued snapshots survive local retention during outages. Automatic retries
+  respect paused/removed games and the original cloud destination; `--no-cloud`
+  and safety snapshots are not automatically queued. Old database rows are
+  migrated without guessing upload intent or fabricating upload timestamps.
+
+### Fixed
+
+- A busy writer no longer drops an automatic game-close backup. Deferred backup
+  requests survive restart and retry before uploads; their health warning stays
+  visible until a regular backup succeeds. Paused/removed games are rechecked
+  before each deferred backup or queued upload, and idle cloud restores wait
+  for unsnapshotted local progress to be secured.
+- The writer lock now covers the complete backup/snapshot/registration sequence,
+  restore staging and safety backup, uploads, and purge. It is separate from the
+  watcher lifetime lock and reentrant only for the owning thread.
+- Periodic discovery immediately backs up newly found games. Tray manual backup
+  includes the current tracked list; a successful game no longer hides another
+  game's backup failure or pending upload.
+- An unavailable rclone binary no longer prevents `gsg auto` from making local
+  backups. Custom-only setups with scanning disabled do not need Ludusavi.
+- Unchanged partial custom backups keep their missing-path warning. A missing
+  or corrupt local snapshot can be rebuilt even when its source has not changed.
+- Uploads verify the queued snapshot checksum. An rclone dry-run cannot mark a
+  version uploaded or trigger retention as though it completed a real transfer.
+- Missing or checksum-invalid queued snapshots are blocked with their version
+  IDs in save health, not repeatedly sent through automatic retries. Their
+  database records, upload intent, and any remaining snapshot files are retained
+  (and can exceed local retention). Restore the exact original snapshot file,
+  then use `gsg retry` or dashboard **u** to revalidate it; new healthy snapshots
+  can still upload while historical snapshots are blocked.
+
 ## 0.8.4 — 2026-09-07
 
 ### Added
