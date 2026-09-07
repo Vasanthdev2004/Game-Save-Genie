@@ -148,6 +148,33 @@ def test_upload_key_retries_and_updates_health(
     _drive(seeded, body)
 
 
+def test_late_game_highlight_during_shutdown_does_not_query_removed_widgets(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delivered: list[bool] = []
+
+    async def body(app: GameSaveGenieApp, pilot: Any) -> None:
+        assert app.is_running and app._selected_game() is not None
+        assert len(app.rows) == 2  # Startup selection still loads normally.
+        table = app.query_one("#games", DataTable)
+        event = DataTable.RowHighlighted(table, 0, table.coordinate_to_cell_key(Coordinate(0, 0)).row_key)
+        close_all = app._close_all
+
+        async def close_with_late_highlight() -> None:
+            # Textual sets is_running=False before pruning its screens. A
+            # highlight queued by the last refresh can arrive during that await.
+            assert not app.is_running
+            await table.remove()
+            app._game_highlighted(event)
+            delivered.append(True)
+            await close_all()
+
+        monkeypatch.setattr(app, "_close_all", close_with_late_highlight)
+
+    _drive(seeded, body)
+    assert delivered == [True]
+
+
 def test_health_leaves_games_visible_in_standard_terminal(seeded: Path) -> None:
     from game_save_genie.database import Database
 

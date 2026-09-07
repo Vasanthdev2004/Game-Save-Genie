@@ -395,6 +395,10 @@ class GameSaveGenieApp(App[None]):
         listings are debounced: holding an arrow key down would otherwise
         launch one rclone process per row.
         """
+        # A refresh can leave RowHighlighted queued while Textual tears down
+        # its screens. is_running is already false before widgets are pruned.
+        if not self.is_running:
+            return
         if self._debounce is not None:
             self._debounce.stop()
             self._debounce = None
