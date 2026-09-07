@@ -13,8 +13,9 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from textual.containers import VerticalScroll
 from textual.coordinate import Coordinate
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Input, Static
 from typer.testing import CliRunner
 
 from game_save_genie.cli import app as cli_app
@@ -95,6 +96,139 @@ def test_versions_are_newest_first(seeded: Path) -> None:
     async def body(app: GameSaveGenieApp, pilot: Any) -> None:
         ids = [row.version_id for row in app.rows]
         assert ids == sorted(ids, reverse=True)
+
+    _drive(seeded, body)
+
+
+def test_health_refresh_keeps_restore_selection_and_shows_backup_failure(seeded: Path) -> None:
+    from game_save_genie.database import Database
+
+    db = Database(seeded.parent / "data" / "versions.db")
+
+    async def body(app: GameSaveGenieApp, pilot: Any) -> None:
+        versions = app.query_one("#versions", DataTable)
+        versions.move_cursor(row=1)
+        selected = app._selected_row()
+        db.set_backup_issue("smoke-game", "disk full [not markup]")
+        app.refresh_health()
+        await pilot.pause()
+        assert app._selected_row() == selected
+        assert app._health["smoke-game"].state == "Needs attention"
+        assert "disk full" in str(app.query_one("#health", Static).render())
+        assert "needs attention" in str(app.query_one("#summary", Static).render())
+
+    _drive(seeded, body)
+
+
+def test_upload_key_retries_and_updates_health(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from game_save_genie.config import load_config, save_config
+    from game_save_genie.models import CloudProvider, CloudSyncResult
+
+    config = load_config(seeded)
+    config.cloud_provider = CloudProvider.LOCAL
+    config.rclone_remote_name = "test"
+    save_config(config, seeded)
+    monkeypatch.setattr("game_save_genie.cli.get_rclone_path", lambda *a: Path("rclone"))
+    monkeypatch.setattr("game_save_genie.cli.prune_remote_versions", lambda *a, **kw: None)
+    monkeypatch.setattr("game_save_genie.cli.upload_save_cas", lambda *a, **kw: CloudSyncResult(
+        success=True, direction="upload", message="ok",
+        remote_path=f"test:{config.remote_root}/smoke-game/manifests/version.json",
+    ))
+
+    async def body(app: GameSaveGenieApp, pilot: Any) -> None:
+        assert app._health["smoke-game"].state == "Local only"
+        await pilot.press("u")
+        await _wait_idle(app, pilot)
+        assert app._health["smoke-game"].state == "Protected"
+        assert app._health["smoke-game"].last_upload is not None
+        assert "Last upload:" in str(app.query_one("#health", Static).render())
+
+    _drive(seeded, body)
+
+
+def test_health_leaves_games_visible_in_standard_terminal(seeded: Path) -> None:
+    from game_save_genie.database import Database
+
+    db = Database(seeded.parent / "data" / "versions.db")
+    db.set_backup_issue("smoke-game", "One of the configured save folders is missing. " * 5)
+
+    async def body(app: GameSaveGenieApp, pilot: Any) -> None:
+        assert app.size.width == 80 and app.size.height == 24
+        assert app.query_one("#games", DataTable).size.height >= 4
+        assert app.query_one("#versions", DataTable).size.height >= 3
+        assert app.query_one("#health-panel", VerticalScroll).region.bottom <= 24
+        assert app.query_one("#health-panel", VerticalScroll).max_scroll_y > 0
+
+    _drive(seeded, body)
+
+
+def test_search_is_literal_and_typing_does_not_trigger_actions(seeded: Path) -> None:
+    async def body(app: GameSaveGenieApp, pilot: Any) -> None:
+        await pilot.press("/")
+        assert app.query_one("#search", Input).has_focus
+        await pilot.press("b", "r", "u")
+        await pilot.pause()
+        assert app.query_one("#search", Input).value == "bru"
+        assert not app._busy and not app.games and not app.rows
+        assert "No matches" in str(app.query_one("#summary", Static).render())
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(app.games) == 1 and app.query_one("#games", DataTable).has_focus
+
+    _drive(seeded, body)
+
+
+def test_empty_search_invalidates_inflight_cloud_results(seeded: Path) -> None:
+    async def body(app: GameSaveGenieApp, pilot: Any) -> None:
+        app.action_toggle_source()
+        token = app._cloud_token
+        app.query_one("#search", Input).value = "does not exist"
+        await pilot.pause()
+        app._set_cloud_rows(token, [VersionRow("v1", "when", "1 B", "1", "cloud", None)], "")
+        assert app.rows == [] and app._selected_row() is None
+
+    _drive(seeded, body)
+
+
+def test_history_labels_safety_copies_and_preserves_full_version_id(seeded: Path) -> None:
+    from game_save_genie.database import Database
+
+    db = Database(seeded.parent / "data" / "versions.db")
+    original = db.get_versions("smoke-game")[0]
+    safety = original.model_copy(update={"id": original.id + "-safety", "origin": "safety",
+                                         "label": "Before restore [important]"})
+    db.add_version(safety)
+
+    async def body(app: GameSaveGenieApp, pilot: Any) -> None:
+        index = next(i for i, row in enumerate(app.rows) if row.version_id == safety.id)
+        table = app.query_one("#versions", DataTable)
+        assert str(table.get_cell_at(Coordinate(index, 1))) == "Safety"
+        assert str(table.get_cell_at(Coordinate(index, 4))) == "Before restore [important]"
+        table.move_cursor(row=index)
+        await pilot.press("r")
+        await pilot.pause()
+        assert safety.id in str(app.screen.query_one("#confirm-text", Static).render())
+        await pilot.press("n")
+
+    _drive(seeded, body)
+
+
+def test_resize_and_activity_keep_restore_history_usable(seeded: Path) -> None:
+    async def body(app: GameSaveGenieApp, pilot: Any) -> None:
+        games = app.query_one("#games", DataTable)
+        versions = app.query_one("#versions", DataTable)
+        assert games.region.bottom <= versions.region.y
+        await pilot.press("l")
+        assert app.screen.has_class("activity")
+        assert versions.size.height >= 2  # Column header and at least one selectable save.
+        await pilot.press("l")
+        await pilot.resize_terminal(140, 40)
+        await pilot.pause()
+        assert games.region.y == versions.region.y
+        assert games.region.right <= versions.region.x
+        assert len(app.rows) == 2
 
     _drive(seeded, body)
 

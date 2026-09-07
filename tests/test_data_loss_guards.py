@@ -160,21 +160,21 @@ def test_every_backup_goes_through_the_cross_process_guard() -> None:
     assert "_backup_guard" in inspect.getsource(cli._run_backup)
 
 
-def test_the_guard_is_a_noop_for_a_daemon_that_already_holds_the_lock(
-    monkeypatch: pytest.MonkeyPatch,
+def test_nested_safety_backup_reuses_writer_lock_not_watcher_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`gsg auto` holds the instance lock for its whole run. Re-acquiring it
-    per backup would make the watcher warn about itself every time."""
+    """The idle daemon permits writers; only the owning thread may nest."""
     from game_save_genie import cli
 
-    monkeypatch.setitem(cli._LOCK_STATE, "held", True)
-
-    def explode() -> None:
-        raise AssertionError("tried to re-acquire a lock this process holds")
-
-    monkeypatch.setattr(cli, "_acquire_instance_lock", explode)
-    with cli._backup_guard("backup"):
-        pass
+    monkeypatch.setattr(cli, "get_data_dir", lambda: tmp_path)
+    daemon = cli._acquire_instance_lock()
+    assert daemon is not None
+    with daemon, cli._backup_guard("restore"):
+        with cli._backup_guard("safety backup"):
+            assert cli._WRITER_LOCAL.held
+            assert cli._acquire_file_lock(tmp_path / "writer.lock") is None
+        assert cli._WRITER_LOCAL.held
+    assert not cli._WRITER_LOCAL.held
 
 
 # --- silent failures (#41) -------------------------------------------------

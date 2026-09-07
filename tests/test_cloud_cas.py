@@ -118,6 +118,49 @@ def test_cas_dedup_download_prune_gc(remote: tuple[str, str], tmp_path: Path) ->
     assert (dl2 / "Test Game" / "mapping.yaml").is_file()
 
 
+def test_persisted_retry_uploads_original_bytes_with_real_rclone(
+    remote: tuple[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from game_save_genie import cli
+    from game_save_genie.config import save_config, save_games
+    from game_save_genie.database import Database
+    from game_save_genie.health import describe_health
+    from game_save_genie.models import CloudProvider, CloudSyncResult, SyncConfig
+
+    assert RCLONE is not None
+    name, root = remote
+    monkeypatch.setattr(cli, "get_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr(cli, "get_rclone_path", lambda *a: RCLONE)
+    cfg = tmp_path / "config.yaml"
+    config = SyncConfig(backup_dir=tmp_path / "backups", cloud_provider=CloudProvider.LOCAL,
+                        rclone_remote_name=name, remote_root=root)
+    save_config(config, cfg)
+    save_games([GAME], cfg)
+    tree = tmp_path / "original"
+    _build_tree(tree, b"offline progress")
+    version = _version("20260907-120000-000000", tree, tmp_path)
+    db = Database(tmp_path / "data" / "versions.db")
+    db.add_version(version, upload_target=remote)
+
+    def offline(*args: object, **kwargs: object) -> CloudSyncResult:
+        raise OSError("simulated network outage")
+
+    monkeypatch.setattr(cli, "upload_save_cas", offline)
+    assert not cli._cloud_upload(cfg, GAME, version, dry_run=False)
+    db = Database(db.db_path)
+    assert db.get_upload_jobs()[0].attempts == 1
+    # The live tree has changed. A retry must send the immutable original.
+    _build_tree(tree, b"later progress")
+    monkeypatch.setattr(cli, "upload_save_cas", cloud.upload_save_cas)
+    assert cli.retry_pending_uploads(cfg, manual=True) == (1, 0)
+    assert describe_health(GAME, config, db).state == "Protected"
+    assert cloud.list_remote_versions(RCLONE, GAME, name, root) == [version.id]
+    restored = tmp_path / "downloaded"
+    assert cloud.download_save(RCLONE, GAME, version.id, restored, name, root).success
+    assert (restored / "Test Game" / "drive-C" / "Users" / "vasan" / "saves" / "slot1.sav").read_bytes() == b"offline progress"
+    assert cli.retry_pending_uploads(cfg, manual=True) == (0, 0)
+
+
 def test_legacy_zip_still_works_alongside_cas(remote: tuple[str, str], tmp_path: Path) -> None:
     """A bucket with an old flat zip AND a new CAS version: both list & download."""
     name, root = remote

@@ -92,9 +92,12 @@ def backup_custom(
             message="No save files found at the configured paths",
         )
     if digest == previous_digest:
+        missing = [str(p.path) for p in game.save_paths if not p.path.exists()]
         return BackupResult(
             success=True, game_id=game.id, files_changed=0,
-            message="No changes detected since last backup",
+            message=("No changes detected since last backup" if not missing
+                     else f"No changes; {len(missing)} save location(s) missing and NOT backed up"),
+            missing_roots=missing,
         )
 
     game_backup_dir = backup_dir / game.id

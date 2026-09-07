@@ -87,6 +87,19 @@ class SaveVersion(BaseModel):
     sha256: str | None = None
     origin: str = "user"  # "user", "auto", or "safety"
     content_digest: str | None = None  # stable source-tree hash for custom-game change detection
+    cloud_synced_at: datetime | None = None
+
+
+class UploadJob(BaseModel):
+    """Durable upload intent, pinned to the destination selected at backup time."""
+
+    version_id: str
+    remote_name: str
+    remote_root: str
+    attempts: int = 0
+    next_attempt_at: float = 0
+    last_error: str | None = None
+    blocked: bool = False
 
 
 class SyncConfig(BaseModel):
