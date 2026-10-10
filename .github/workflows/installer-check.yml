@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "packaging/**"
+      - "src/game_save_genie/cli.py"
       - ".github/workflows/installer-check.yml"
       - ".github/workflows/release.yml"
   workflow_dispatch:
@@ -23,6 +24,9 @@ jobs:
         run: |
           pip install . pyinstaller
           .\packaging\build_exe.ps1
+      - name: Frozen tray-status process regression
+        shell: pwsh
+        run: python packaging/check_frozen_status.py
       - name: Ensure Inno Setup
         shell: pwsh
         run: |
