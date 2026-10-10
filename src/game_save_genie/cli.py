@@ -1894,16 +1894,26 @@ def _open_status_window(config_path: Path | None) -> None:
     args = [str(exe), "status"]
     if config_path:
         args = [str(exe), "--config", str(config_path), "status"]
+    child_env = None
+    if getattr(sys, "frozen", False):
+        # Status is an independent instance that can outlive the watcher.
+        # Give it its own PyInstaller runtime without changing our environment.
+        child_env = os.environ.copy()
+        child_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     try:
         if os.name == "nt":
             # /k keeps the window open after status has printed.
-            subprocess.Popen(["cmd", "/k", *args], creationflags=_CREATE_NEW_CONSOLE)
+            subprocess.Popen(
+                ["cmd", "/k", *args],
+                creationflags=_CREATE_NEW_CONSOLE,
+                env=child_env,
+            )
             return
         import shutil
 
         for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
             if shutil.which(term):
-                subprocess.Popen([term, "-e", *args])
+                subprocess.Popen([term, "-e", *args], env=child_env)
                 return
         # No terminal to borrow: the log folder is the next best thing.
         _open_path(get_data_dir() / "logs")

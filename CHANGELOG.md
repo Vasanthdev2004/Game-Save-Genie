@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Tray **Show status** launches an independent PyInstaller instance instead of
+  inheriting the watcher's bootloader state. Only the child environment is
+  reset; the watcher and its other subprocesses are unchanged. This also lets
+  the status window remain open after the watcher exits. ([#69](https://github.com/Vasanthdev2004/Game-Save-Genie/issues/69))
+
 ## 0.9.0 — 2026-09-07
 
 ### Added
